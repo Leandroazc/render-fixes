@@ -227,6 +227,7 @@ pub fn track(
         t.at.set(Some(b));
         for (i, inst) in block.insts.iter().enumerate() {
             let site = (b, i);
+            t.guard.set(lanes.and_then(|l| l.guards.get(b)?.get(i).copied().flatten()));
             let fail = |what| ShaderError::Unsupported {
                 offset: inst.machine.offset,
                 what,
@@ -335,6 +336,7 @@ pub fn track(
     }
     // What follows traces no access of one block.
     t.at.set(None);
+    t.guard.set(None);
     // The proof needs the per-lane form. Without it nothing is emitted, and
     // its failure is the one to report, so the reads stay unproven here.
     if t.lanes.is_none() {
@@ -413,6 +415,10 @@ struct Tracer<'a> {
     rpo: Vec<usize>,
     /// The block of the access being traced ([`Self::live`]).
     at: std::cell::Cell<Option<usize>>,
+    /// The guard of the vector instruction being traced: only lanes that run it read its
+    /// descriptors (one with its EXEC bit clear may have come by a path that left other
+    /// values in the registers).
+    guard: std::cell::Cell<Option<Bool>>,
 }
 
 /// What lanes are known to satisfy: each [`Bool`] where its flag is set,
@@ -480,6 +486,7 @@ impl<'a> Tracer<'a> {
             meets: Default::default(),
             rpo,
             at: Default::default(),
+            guard: Default::default(),
         };
         t.origin = t.propagate_copies(n)?;
         Ok(t)
@@ -1124,6 +1131,7 @@ impl<'a> Tracer<'a> {
             .ok_or("a descriptor not in SGPRs")?;
         // Only the lanes that reach the access read the descriptor.
         let mut known = Vec::from_iter(self.lanes.map(|l| (l.reach[at], true)));
+        known.extend(self.guard.get().map(|g| (g, true)));
         self.classify(&words, &mut Vec::new(), &mut known)
     }
 
@@ -1276,6 +1284,7 @@ impl<'a> Tracer<'a> {
             return t;
         };
         let mut known = vec![(lanes.reach[at], true)];
+        known.extend(self.guard.get().map(|g| (g, true)));
         for _ in 0..MAX_JOINS {
             let Term::Value(v) = t else { break };
             let Some((block, i)) = self.phis[v.0 as usize] else {

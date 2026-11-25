@@ -1554,6 +1554,14 @@ impl<'a> Lower<'a> {
             if console_lanes || one_wave && s.lds_dwords > 0 {
                 s.wave_size = Some(wave);
             }
+            // `VICTORY_WAVE_WHY=1`: the form every console wave64 program takes on the host
+            if x.native.wave64 && std::env::var_os("VICTORY_WAVE_WHY").is_some() {
+                eprintln!(
+                    "WAVE-FORM wave={wave} group={group} console_lanes={console_lanes} split_lds={split_lds} lds_meetings={} exchange={}",
+                    lds_meet.is_some(),
+                    exchange.is_some()
+                );
+            }
         }
         // The title's barriers a thread of the group may never reach, which
         // leaves the others waiting on the host: those in blocks some lanes

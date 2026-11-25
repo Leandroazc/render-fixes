@@ -98,6 +98,10 @@ struct Window {
     scratch: ID3D12Resource,
 }
 
+/// Indirect calls that read their record from a window clamped before (hits), that clamped
+/// their own pass (clamps): for the periodic line.
+pub(crate) static CLAMP_COUNTS: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
 /// The most records clamped in one pass ([`windows`]).
 const WINDOW_MOST: u64 = 64;
 
@@ -2403,6 +2407,7 @@ impl State {
             .filter(|w| same(w) && offset >= w.base)
             .filter(|w| (offset - w.base) % u64::from(w.step) == 0 && (offset - w.base) / u64::from(w.step) < u64::from(w.records))
             .map(|w| (w.scratch.clone(), offset - w.base));
+        CLAMP_COUNTS[usize::from(hit.is_none())].fetch_add(1, Ordering::Relaxed);
         let (bounded, at) = match hit {
             Some(hit) => hit,
             None => {

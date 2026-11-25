@@ -5675,8 +5675,10 @@ impl Meter {
         let indirect = crate::list::take_indirect() as f64 / frames;
         let mesh_largest = MESH_GROUPS[0].swap(0, Ordering::Relaxed);
         let mesh_groups = MESH_GROUPS[1].swap(0, Ordering::Relaxed) as f64 / frames;
+        let [hits, clamps] =
+            [0, 1].map(|i| crate::draw::CLAMP_COUNTS[i].swap(0, Ordering::Relaxed) as f64 / frames);
         tracing::info!(
-            "indirect mesh dispatches: the largest group count asked for {mesh_largest} (run: at most 65535), {mesh_groups:.0} groups asked per frame"
+            "indirect mesh dispatches: the largest group count asked for {mesh_largest} (run: at most 65535), {mesh_groups:.0} groups asked per frame; indirect calls per frame: {clamps:.0} clamped on their own, {hits:.0} from a window clamped before"
         );
         late_line(frames);
         card_clock_line(frames, ms);

@@ -358,9 +358,38 @@ static RESIDENT: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic:
 /// 85 % of the card's budget, windows of title memory and staging buffers
 /// for five minutes with 12 GiB of the PC's memory free, and 1 GiB of
 /// scratch chunks.
+/// Off by default on a PC with little memory ([`small_memory`]).
 pub(crate) fn keep_freed() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_KEEP_FREED").is_none_or(|v| v != "0"))
+    *ON.get_or_init(|| match std::env::var_os("VICTORY_KEEP_FREED") {
+        Some(v) => v != "0",
+        None => !small_memory(),
+    })
+}
+
+/// Whether this PC has little memory (under 24 GiB): the system gives the
+/// card half of it to share, and what is kept there for later runs out.
+/// On 16 GB with an 8 GB card (RTX 2060 SUPER) the memory shared with the
+/// card has a budget of 7,482 MB; with kept freed memory, pooled lists and
+/// 1,024 snapshot buffers it reached 7,440 MB a minute into the world and
+/// the next host list could not be made (`E_OUTOFMEMORY`), in every run;
+/// without them it stayed at 5.5-6.1 GB. `VICTORY_SMALL_MEMORY=0` or `1`
+/// says it instead.
+pub(crate) fn small_memory() -> bool {
+    static SMALL: OnceLock<bool> = OnceLock::new();
+    *SMALL.get_or_init(|| {
+        if let Some(v) = std::env::var_os("VICTORY_SMALL_MEMORY") {
+            return v != "0";
+        }
+        use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        // SAFETY: plain data the call fills in.
+        let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+        m.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
+        // SAFETY: a sized structure.
+        let small = unsafe { GlobalMemoryStatusEx(&mut m) } != 0 && m.ullTotalPhys < 24 << 30;
+        tracing::info!(small, total_mb = m.ullTotalPhys >> 20, "a PC with little memory: less is kept for later");
+        small
+    })
 }
 
 /// Effective idle timeout (in milliseconds) for system-RAM caches (staging

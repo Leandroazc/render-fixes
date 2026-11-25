@@ -254,7 +254,11 @@ const IDLE_MOST: (usize, u64) = (512, 256 << 20);
 #[cfg(windows)]
 fn pools() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_LIST_POOL").is_none_or(|v| v != "0"))
+    // Off by default on a PC with little memory (`host::small_memory`).
+    *ON.get_or_init(|| match std::env::var_os("VICTORY_LIST_POOL") {
+        Some(v) => v != "0",
+        None => !crate::host::small_memory(),
+    })
 }
 
 /// A host list open for recording: one that has run, as a title's list is

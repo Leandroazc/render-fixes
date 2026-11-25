@@ -36,6 +36,21 @@ What is known to be wrong:
   pipelines (`victory warm` makes them ahead).
 - Recording a frame in the world makes the title's own watchdog end it.
 
+## On NVIDIA with 16 GB of RAM (this branch)
+
+Tested on an RTX 2060 SUPER (8 GB, waves of 32 lanes only) with 16 GB of RAM.
+This branch adds what that card needs (the wave-32 translation, textures past
+the card's budget while the PC can commit, the Series S profile's upscaler) and,
+under 24 GB of RAM, keeps less memory for later (no kept freed memory, no list
+pool, eight snapshot buffers): with them the memory the system lets the card
+share (half the RAM) ran out a minute into the world. Run with `-SeriesS`:
+
+```powershell
+scripts\play.ps1 -Exe <path of your copy's executable> -SeriesS
+```
+
+Prologue, Series S profile: about 2 fps, the card the limit (some 215 ms a frame).
+
 ## How to run it
 
 You need Windows 10/11 x64, a CPU with AVX2, a Direct3D 12 GPU with shader

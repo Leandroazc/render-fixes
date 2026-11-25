@@ -151,14 +151,29 @@ extern "system" fn adapter_description(_: This, out: *mut AdapterDescription) ->
     }
     // shortcut: memory sizes are the title's split (GPU-optimal, standard),
     // not measured; revisit once memory is emulated.
+    // Series S has one range, all of it in the GPU's fast pool, so it is
+    // all the card's own here: answering 0 (its GPU-optimal share) made the
+    // title stream as if the card had no memory, and the prison cell's
+    // walls, window glass and posters were never drawn (3 runs of 3); with
+    // the whole range they come, though not in every run.
+    // shortcut: what a Series S answers is not known; `VICTORY_DEDICATED_MB`
+    // overrides it (and Series X's) for trying other figures.
     let (gpu_optimal, standard) = crate::console::current().title_memory();
+    let dedicated = match std::env::var("VICTORY_DEDICATED_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        Some(mb) => mb << 20,
+        None if gpu_optimal == 0 => standard,
+        None => gpu_optimal,
+    };
     let description = AdapterDescription {
         name,
         vendor: AMD,
         device: 0,
         subsystem: 0,
         revision: 0,
-        dedicated_video_memory: gpu_optimal,
+        dedicated_video_memory: dedicated,
         dedicated_system_memory: 0,
         shared_system_memory: standard,
         luid: [1, 0],

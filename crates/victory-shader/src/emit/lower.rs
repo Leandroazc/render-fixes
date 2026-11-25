@@ -8642,9 +8642,12 @@ impl<'a> Lower<'a> {
                 let Some(Operand::Vector { reg, .. }) = v.dst else {
                     return Err("a mixed-precision result");
                 };
-                let old = match inst.read(Reg::V(reg)) {
-                    Some(o) => self.i32_of(o)?,
-                    None => self.s.m.i32(0),
+                // The kept half as `write_half` takes it: 0 where the register holds nothing
+                // the lowering has (an interpolation's first half, whose f32 the second half
+                // reads: the title's 78f3f2fc53a69531 mixes into the low half of one)
+                let old = match inst.read(Reg::V(reg)).map(|o| self.i32_of(o)) {
+                    Some(Ok(o)) => o,
+                    _ => self.s.m.i32(0),
                 };
                 let h = self
                     .s

@@ -1529,6 +1529,11 @@ mod barycentric_tests {
     /// Translates a pixel program with the input VGPRs `input_addr`
     /// enables and one float4 TEXCOORD0 attribute (attr 0, row 0).
     fn pixel(words: &[u32], input_addr: u32) -> Result<HostShader, ShaderError> {
+        pixel_of(words, input_addr, false)
+    }
+
+    /// [`pixel`], with TEXCOORD0 made of 16-bit values with `fp16`.
+    fn pixel_of(words: &[u32], input_addr: u32, fp16: bool) -> Result<HostShader, ShaderError> {
         let native = NativeProgram {
             stage: HwStage::Ps,
             wave64: false,
@@ -1542,7 +1547,7 @@ mod barycentric_tests {
                     mask: 0b1111,
                     attr: 0,
                     flat: false,
-                    fp16: false,
+                    fp16,
                     pack2: false,
                     row2: 0,
                 }],
@@ -1554,7 +1559,9 @@ mod barycentric_tests {
         };
         let mut target = element("SV_Target", 16, 0);
         target.usage = 15;
-        let isg1 = container::signature(&[element("TEXCOORD", 0, 0)], true);
+        let mut texcoord = element("TEXCOORD", 0, 0);
+        texcoord.half = fp16;
+        let isg1 = container::signature(&[texcoord], true);
         let osg1 = container::signature(&[target], false);
         let bytes = crate::dxbc::build(&[(FourCC::ISG1, &isg1), (FourCC::OSG1, &osg1)]);
         let c = Container::parse(&bytes).unwrap();
@@ -1642,6 +1649,28 @@ mod barycentric_tests {
         let (features, inputs) = parts(&shader);
         assert_eq!(features & 0x2_0000, 0);
         assert!(inputs.iter().all(|e| e.kind != 28), "{inputs:?}");
+        validate(&shader);
+    }
+
+    /// A 16-bit interpolation into v9, then `v_fma_mixlo_f16` into the low half of v8, which
+    /// still holds the first half's f32 (the title's 78f3f2fc53a69531): the kept high half is
+    /// nothing the program reads, and does not stop the translation.
+    #[test]
+    fn a_16_bit_result_over_a_first_half_of_an_interpolation() {
+        let [e0, e1] = exp_mrt0(2);
+        let words = [
+            0xD742_0008,
+            0x0002_0000, // v_interp_p1ll_f16 v8, v0, attr0.x
+            0xD75A_0009,
+            0x0422_0200, // v_interp_p2_f16 v9, v1, attr0.x, v8
+            0xCC21_0008,
+            0x0A01_E509, // v_fma_mixlo_f16 v8, sel_lo(v9), 1.0, 0
+            0x7E04_1708, // v_cvt_f32_f16 v2, v8
+            e0,
+            e1,
+            0xBF81_0000,
+        ];
+        let shader = pixel_of(&words, PERSP_CENTER, true).unwrap();
         validate(&shader);
     }
 

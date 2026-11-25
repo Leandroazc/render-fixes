@@ -55,7 +55,7 @@
 //!   require SM 6.6 atomic support on typed and descriptor-heap resources.
 //!
 //! Entry points: [`translate`] (container bytes as the title passes them
-//! at pipeline creation → [`HostShader`]), [`emit`] (the same with the
+//! at pipeline creation â†’ [`HostShader`]), [`emit`] (the same with the
 //! earlier stages already run). The root constants of each stage must
 //! cover [`HostShader::user_data_dwords`]. Stability: these types and the
 //! binding scheme are what pipeline creation builds on; changes are
@@ -3238,6 +3238,30 @@ mod barycentric_tests {
         if ran == 0 {
             eprintln!("no SM 6.6 host with barycentrics; GPU checks skipped");
         }
+    }
+
+    /// A 16-bit interpolation into v9, then `v_fma_mixlo_f16` into the low half of v8, which
+    /// still holds the first half's f32 (the title's 78f3f2fc53a69531): the kept high half is
+    /// nothing the program reads, and does not stop the translation.
+    #[test]
+    fn a_16_bit_result_over_a_first_half_of_an_interpolation() {
+        let [e0, e1] = exp_mrt0(2);
+        let words = [
+            0xD742_0008,
+            0x0002_0000, // v_interp_p1ll_f16 v8, v0, attr0.x
+            0xD75A_0009,
+            0x0422_0200, // v_interp_p2_f16 v9, v1, attr0.x, v8
+            0xCC21_0008,
+            0x0A01_E509, // v_fma_mixlo_f16 v8, sel_lo(v9), 1.0, 0
+            0x7E04_1708, // v_cvt_f32_f16 v2, v8
+            e0,
+            e1,
+            0xBF81_0000,
+        ];
+        let mut texcoord = element("TEXCOORD", 0, 0);
+        texcoord.half = true;
+        let shader = pixel_with_inputs(&words, PERSP_CENTER, &[texcoord]).unwrap();
+        validate(&shader);
     }
 
     /// Both: the attribute is interpolated and J is used as a value.

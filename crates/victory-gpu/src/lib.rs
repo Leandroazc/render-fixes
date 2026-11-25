@@ -86,6 +86,8 @@ pub mod titlewrite;
 #[cfg(windows)]
 mod upload;
 #[cfg(windows)]
+pub mod upscale;
+#[cfg(windows)]
 mod watch;
 #[cfg(windows)]
 mod texback;

@@ -1361,6 +1361,17 @@ pub(crate) fn host_made<'a>(
 /// (`VICTORY_TEXTURE_BUDGET_MB` sets a limit on those copies' bytes
 /// instead). Past the budget the system moves the card's memory into the
 /// PC's, which ended runs 20 and 24.
+///
+/// On an 8 GB card that left the prologue's materials without colour:
+/// render targets (2.7 GB) and buffers took most of the budget, and 12,000
+/// texture slots waited for good, the newest among them (the prison
+/// uniform, the window's glass and the fence outside). Past nine tenths
+/// of the budget more copies are made while the PC has `LEFT_TO_COMMIT`
+/// bytes left to commit and the card's memory in use stays under half
+/// again its budget: the system then keeps the least used of it in the
+/// PC's memory (the prologue ran so at 9.8 GB of a 6.9 GB budget, no
+/// slower; with no bound, 1.7 GB were left to commit).
+/// `VICTORY_TEXTURE_OVER=0` stops at the budget, as before.
 #[cfg(windows)]
 pub(crate) fn room() -> bool {
     use std::sync::atomic::Ordering::Relaxed;
@@ -1379,9 +1390,38 @@ pub(crate) fn room() -> bool {
         return true;
     }
     match crate::host::host().and_then(|h| h.video_memory()) {
-        Some([budget, used, ..]) => used < budget / 10 * 9,
+        Some([budget, used, ..]) if used < budget / 10 * 9 => true,
+        Some([budget, used, ..]) => over_budget() && used < budget + budget / 2 && left_to_commit() > LEFT_TO_COMMIT,
         None => filled < WITHOUT_BUDGET,
     }
+}
+
+/// What [`room`] leaves the PC to commit when the card is past its budget
+/// (physical memory free says little: the title's memory is mostly paged
+/// out, and the PC had 1 GB free at every budget).
+#[cfg(windows)]
+const LEFT_TO_COMMIT: u64 = 6 << 30;
+
+/// Whether [`room`] goes past the card's budget (`VICTORY_TEXTURE_OVER=0`:
+/// it does not).
+#[cfg(windows)]
+fn over_budget() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_OVER").is_none_or(|v| v != "0"))
+}
+
+/// The bytes the PC can still commit (physical memory and page file).
+#[cfg(windows)]
+fn left_to_commit() -> u64 {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    // SAFETY: plain data the call fills in.
+    let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    m.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
+    // SAFETY: a sized structure.
+    if unsafe { GlobalMemoryStatusEx(&mut m) } == 0 {
+        return 0;
+    }
+    m.ullAvailPageFile
 }
 
 /// Lets go of the host copies of textures the title fills that nothing
@@ -1477,11 +1517,13 @@ pub(crate) fn let_go_idle() {
 /// of those a descriptor slot still shows (the card holds a texture the
 /// title has given up for as long as a slot shows it). The last two are
 /// estimates from every 16th such texture: asking Windows about the memory
-/// of all 16,000 takes too long.
+/// of all 16,000 takes too long. Then, of the host copies the host renders
+/// to or writes and of those the title fills, how many nothing asked for
+/// in ten seconds and 64 frames, and their bytes.
 #[cfg(all(windows, feature = "diagnostics"))]
-pub(crate) fn census() -> [u64; 10] {
+pub(crate) fn census() -> [u64; 14] {
     const EVERY: u64 = 16;
-    let mut count = [0u64; 10];
+    let mut count = [0u64; 14];
     let mut placed_filled = 0u64;
     let all = textures();
     for &at in all.iter() {
@@ -1493,6 +1535,11 @@ pub(crate) fn census() -> [u64; 10] {
                 let kind = if host.filled { 4 } else { 0 };
                 count[kind] += 1;
                 count[kind + 1] += host.bytes + twin.as_ref().map_or(0, |t| t.colour.bytes);
+                if crate::host::long_ago(r.host.used.load(std::sync::atomic::Ordering::Relaxed), 10_000, 64) {
+                    let idle = if host.filled { 12 } else { 10 };
+                    count[idle] += 1;
+                    count[idle + 1] += host.bytes + twin.as_ref().map_or(0, |t| t.colour.bytes);
+                }
                 count[7] += twin.as_ref().map_or(0, |t| t.colour.bytes);
                 let placed = r.host.placed.load(std::sync::atomic::Ordering::Relaxed);
                 if placed {

@@ -903,6 +903,20 @@ fn emit_program(
     {
         vertex_output_interpolation(psv.data, &mut outputs)?;
     }
+    // Elements packed into one row share its mode (the validator wants that, and the title's
+    // compiler packs only such): a row with a constant one (an integer's) is constant, as
+    // the title's PSV0 declares a float beside an integer (mesh 443890ea4e874255's COLOR3).
+    let interpolated = if pixel { &mut inputs } else { &mut outputs };
+    let constant_rows: Vec<u32> = interpolated
+        .iter()
+        .filter(|e| e.interp == 1)
+        .filter_map(|e| e.row)
+        .collect();
+    for e in interpolated.iter_mut() {
+        if e.interp == 2 && e.row.is_some_and(|r| constant_rows.contains(&r)) {
+            e.interp = 1;
+        }
+    }
     // With a conservative depth output (SV_DepthLessEqual, GreaterEqual) DXIL
     // wants the position centroid (or per sample), as DXC declares it then.
     if pixel && outputs.iter().any(|e| matches!(e.kind, 18 | 19)) {

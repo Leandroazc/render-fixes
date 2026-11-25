@@ -142,6 +142,30 @@ impl Bools {
         vars.into_iter().map(|v| self.atoms[v as usize]).collect()
     }
 
+    /// Whether `atom` holds wherever `b` does: `b` with `atom` false is never true.
+    pub fn implies_atom(&self, b: Bool, atom: Atom) -> bool {
+        let Some(&v) = self.ids.get(&atom) else {
+            return b == Bool::FALSE;
+        };
+        let (mut seen, mut stack) = (Vec::new(), vec![b]);
+        while let Some(b) = stack.pop() {
+            if b == Bool::FALSE || seen.contains(&b) {
+                continue;
+            }
+            if b == Bool::TRUE {
+                return false;
+            }
+            seen.push(b);
+            let (bv, lo, hi) = self.nodes[b.0 as usize];
+            if bv == v {
+                stack.push(lo);
+            } else {
+                stack.extend([lo, hi]);
+            }
+        }
+        true
+    }
+
     fn vars(&self, b: Bool) -> Vec<u32> {
         let (mut seen, mut vars, mut stack) = (Vec::new(), Vec::new(), vec![b]);
         while let Some(b) = stack.pop() {

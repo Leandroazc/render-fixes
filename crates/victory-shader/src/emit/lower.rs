@@ -928,9 +928,17 @@ fn meeting_mode() -> u32 {
 /// there: before the exit of an all-lane block into a region with LDS accesses, and at the
 /// start of an all-lane block entered from one. Accesses in all-lane blocks get their own
 /// barrier as before. What that cannot order is a write and a read inside one region (blocks
-/// joined without an all-lane block between them): refused.
+/// joined without an all-lane block between them) – unless they cannot meet: the bytes they
+/// touch are known (constant addresses) and apart, both are atomics, or every access of the
+/// region is made by one thread of the group (`threads`), whose own accesses keep its order.
+/// Otherwise refused.
 /// shortcut: two writes in one region are taken not to hit the same dword from both halves.
-fn lds_meetings(p: &crate::ir::Program, st: &Structured, all: &[bool]) -> Option<Vec<(bool, bool)>> {
+fn lds_meetings(
+    p: &crate::ir::Program,
+    st: &Structured,
+    all: &[bool],
+    threads: [u32; 3],
+) -> Option<Vec<(bool, bool)>> {
     let n = st.exits.len();
     let succ = |b: usize| -> Vec<usize> {
         match st.exits[b] {
@@ -956,9 +964,11 @@ fn lds_meetings(p: &crate::ir::Program, st: &Structured, all: &[bool]) -> Option
             }
         }
     }
-    // per region: LDS reads, LDS writes
+    // per region: LDS reads, LDS writes, and each access
     let mut reads = vec![false; n];
     let mut writes = vec![false; n];
+    let mut accesses: Vec<Vec<LdsAccess>> = vec![Vec::new(); n];
+    let mut defs: Option<HashMap<Value, &Inst>> = None;
     for (b, block) in p.blocks.iter().enumerate().take(n) {
         if all[b] {
             continue;
@@ -969,15 +979,44 @@ fn lds_meetings(p: &crate::ir::Program, st: &Structured, all: &[bool]) -> Option
             if !matches!(i.fields, Fields::Ds { .. }) || name.starts_with("ds_swizzle") || name.contains("permute") {
                 continue;
             }
-            if name.starts_with("ds_read") {
-                reads[r] = true;
-            } else {
-                writes[r] = true;
-            }
+            let read = !name.starts_with("ds_write");
+            let write = !name.starts_with("ds_read");
+            reads[r] |= read;
+            writes[r] |= write;
+            let defs = defs.get_or_insert_with(|| value_defs(p));
+            accesses[r].push(LdsAccess {
+                block: b,
+                read,
+                write,
+                bytes: lds_bytes(i, defs),
+            });
         }
     }
-    if (0..n).any(|r| reads[r] && writes[r]) {
-        return None;
+    for r in 0..n {
+        if !(reads[r] && writes[r]) {
+            continue;
+        }
+        let acc = &accesses[r];
+        // an access of one instruction is the console's too; atomics among themselves keep
+        // the console's results up to the order of lanes, which it does not promise either
+        let clash = acc.iter().enumerate().any(|(x, a)| {
+            acc.iter().enumerate().any(|(y, w)| {
+                x != y
+                    && a.read
+                    && w.write
+                    && !(a.write && w.read)
+                    && match (&a.bytes, &w.bytes) {
+                        (Some(ra), Some(rw)) => ra.iter().any(|&(s, e)| rw.iter().any(|&(t, f)| s < f && t < e)),
+                        _ => true,
+                    }
+            })
+        });
+        if clash {
+            let defs = defs.get_or_insert_with(|| value_defs(p));
+            if !acc.iter().all(|a| one_thread(st, st.reach[a.block], p, defs, threads)) {
+                return None;
+            }
+        }
     }
     let mut meet = vec![(false, false); n];
     for b in 0..n {
@@ -992,6 +1031,130 @@ fn lds_meetings(p: &crate::ir::Program, st: &Structured, all: &[bool]) -> Option
         }
     }
     Some(meet)
+}
+
+/// An LDS access in a lane branch's region ([`lds_meetings`]).
+#[derive(Debug, Clone)]
+struct LdsAccess {
+    block: usize,
+    read: bool,
+    write: bool,
+    /// The byte ranges it touches, where its address is a constant.
+    bytes: Option<Vec<(u32, u32)>>,
+}
+
+/// The instruction that writes each value.
+fn value_defs(p: &Program) -> HashMap<Value, &Inst> {
+    let mut defs = HashMap::new();
+    for i in p.blocks.iter().flat_map(|b| &b.insts) {
+        for &(_, v) in &i.writes {
+            defs.insert(v, i);
+        }
+    }
+    defs
+}
+
+/// The number `v` is where a `v_mov_b32` of a constant sets it.
+fn constant_vgpr(v: Value, defs: &HashMap<Value, &Inst>) -> Option<u32> {
+    let i = defs.get(&v)?;
+    let Fields::Valu(x) = &i.fields else {
+        return None;
+    };
+    if i.name() != "v_mov_b32" || x.sdwa.is_some() || x.dpp.is_some() {
+        return None;
+    }
+    match x.src.first()? {
+        Operand::Const(c @ 128..=192) => Some(u32::from(c - 128)),
+        Operand::Literal(l) => Some(*l),
+        _ => None,
+    }
+}
+
+/// The LDS bytes a `ds_*` instruction at a constant address touches.
+fn lds_bytes(i: &Inst, defs: &HashMap<Value, &Inst>) -> Option<Vec<(u32, u32)>> {
+    let Fields::Ds {
+        addr: Some(Operand::Vector { reg, .. }),
+        offset0,
+        offset1,
+        ..
+    } = &i.fields
+    else {
+        return None;
+    };
+    let base = constant_vgpr(i.read(Reg::V(*reg))?, defs)?;
+    if base > 0x1_0000 {
+        return None;
+    }
+    let name = i.name();
+    const SIZES: [(&str, u32); 16] = [
+        ("b128", 16),
+        ("b96", 12),
+        ("b64", 8),
+        ("u64", 8),
+        ("i64", 8),
+        ("f64", 8),
+        ("b32", 4),
+        ("u32", 4),
+        ("i32", 4),
+        ("f32", 4),
+        ("u16", 2),
+        ("i16", 2),
+        ("b16", 2),
+        ("u8", 1),
+        ("i8", 1),
+        ("b8", 1),
+    ];
+    let size = SIZES.iter().find(|(s, _)| name.contains(s))?.1;
+    let two = name.contains("read2") || name.contains("write2") || name.contains("xchg2");
+    let step = if name.contains("st64") { size * 64 } else { size };
+    let at = |a: u32| (a, a + size);
+    Some(if two {
+        vec![at(base + u32::from(*offset0) * step), at(base + u32::from(*offset1) * step)]
+    } else {
+        vec![at(base + (u32::from(*offset0) | u32::from(*offset1) << 8))]
+    })
+}
+
+/// Whether at most one thread of the group (`threads`) gets where `reach` holds: it implies
+/// that each thread id component the group has more than one of equals a constant.
+fn one_thread(st: &Structured, reach: Bool, p: &Program, defs: &HashMap<Value, &Inst>, threads: [u32; 3]) -> bool {
+    let mut pinned = [false; 3];
+    for a in st.bools.support(reach) {
+        let Atom::Lane(v) = a else {
+            continue;
+        };
+        let Some(i) = defs.get(&v) else {
+            continue;
+        };
+        let Fields::Valu(x) = &i.fields else {
+            continue;
+        };
+        if !matches!(i.name(), "v_cmp_eq_u32" | "v_cmp_eq_i32")
+            || x.sdwa.is_some()
+            || x.dpp.is_some()
+            || x.src.len() != 2
+            || !st.bools.implies_atom(reach, a)
+        {
+            continue;
+        }
+        // a thread id component as the hardware set it up
+        let tid = |o: &Operand| match *o {
+            Operand::Vector { reg, dwords: 1 } if reg < 3 => i
+                .read(Reg::V(reg))
+                .filter(|&v| p.inputs.contains(&(Reg::V(reg), v)))
+                .map(|_| usize::from(reg)),
+            _ => None,
+        };
+        let konst = |o: &Operand| matches!(o, Operand::Const(128..=208) | Operand::Literal(_));
+        let c = match (&x.src[0], &x.src[1]) {
+            (k, o) | (o, k) if konst(k) => tid(o),
+            _ => None,
+        };
+        if let Some(c) = c {
+            pinned[c] = true;
+        }
+    }
+    (0..3).all(|c| pinned[c] || threads[c] <= 1)
 }
 
 /// Masks held as numbers or constant lane sets in guards or lane branches: the lane tests its
@@ -1455,7 +1618,7 @@ impl<'a> Lower<'a> {
                             })
                         });
                         let mut lds_ok = !(s.lds_dwords > 0 && group > 32) || ok;
-                        if !lds_ok && let Some(meet) = lds_meetings(p, x.st, &all) {
+                        if !lds_ok && let Some(meet) = lds_meetings(p, x.st, &all, cs.threads) {
                             lds_meet = Some((all.clone(), meet));
                             lds_ok = true;
                         }
@@ -1509,7 +1672,7 @@ impl<'a> Lower<'a> {
                         why.push("LDS in a group over 32");
                         match all_lane_blocks(x.st) {
                             None => why.push("an indirect exit"),
-                            Some(all) if lds_meetings(p, x.st, &all).is_none() => {
+                            Some(all) if lds_meetings(p, x.st, &all, cs.threads).is_none() => {
                                 why.push("an LDS read and write in one lane-branch region")
                             }
                             Some(_) => {}
@@ -12717,6 +12880,47 @@ mod tests {
     use crate::{io, ir, resource, structure};
 
     const S_ENDPGM: u32 = 0xBF81_0000;
+
+    /// Whether the host waves of a console wave64 group of `threads` keep the order of the LDS
+    /// accesses in a lane branch: `cmp` picks the lanes (against v0), then a `ds_read2_b32` of
+    /// dwords 4 and 5 and a `ds_write2_b32` of `write` at a constant address.
+    fn lane_branch_lds_ok(cmp: [u32; 2], write: [u32; 2], threads: [u32; 3]) -> bool {
+        use super::{all_lane_blocks, lds_meetings};
+        let code: Vec<u8> = [
+            cmp[0], cmp[1],
+            0xBE82_2400, // s_and_saveexec_b64 s[2:3], s[0:1]
+            0xBF88_0005, // s_cbranch_execz to the restore
+            0x7E06_0280, // v_mov_b32 v3, 0
+            0xD8DC_0504, 0x0100_0003, // ds_read2_b32 v[1:2], v3 offset0:4 offset1:5
+            write[0], write[1],
+            0xBEFE_0402, // s_mov_b64 exec, s[2:3]
+            S_ENDPGM,
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+        let p = ir::build(&code, true, 8).unwrap();
+        let st = structure::structure(&p).unwrap();
+        let all = all_lane_blocks(&st).unwrap();
+        assert!(all.iter().any(|&a| !a), "the accesses sit in a lane branch");
+        lds_meetings(&p, &st, &all, threads).is_some()
+    }
+
+    #[test]
+    fn lane_branch_lds_read_and_write_split_where_they_cannot_meet() {
+        const EQ0: [u32; 2] = [0xD4C2_0000, 0x0002_0080]; // v_cmp_eq_u32 s[0:1], 0, v0
+        const LT0: [u32; 2] = [0xD4C1_0000, 0x0002_0080]; // v_cmp_lt_u32 s[0:1], 0, v0
+        const SAME: [u32; 2] = [0xD838_0504, 0x0003_0303]; // ds_write2_b32 v3, v3, v3 offset0:4 offset1:5
+        const APART: [u32; 2] = [0xD838_0706, 0x0003_0303]; // ... offset0:6 offset1:7
+        // thread 0 alone: its own order
+        assert!(lane_branch_lds_ok(EQ0, SAME, [64, 1, 1]));
+        // threads 1..63 read and write the same dwords: both halves, refused
+        assert!(!lane_branch_lds_ok(LT0, SAME, [64, 1, 1]));
+        // other dwords: no order to keep
+        assert!(lane_branch_lds_ok(LT0, APART, [64, 1, 1]));
+        // x == 0 is one thread per row of a 32x2 group
+        assert!(!lane_branch_lds_ok(EQ0, SAME, [32, 2, 1]));
+    }
 
     #[test]
     fn packed_pixel_inputs_find_their_second_row() {

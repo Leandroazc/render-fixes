@@ -14,6 +14,8 @@
 //! `VICTORY_AMBIENT=<level>` sets it (0.6 by default, 0 for none); `off`
 //! keeps the title's own output.
 //! shortcut: the same light everywhere, from everywhere; gone once rays run.
+//!
+//! From Belobug/VIctory-Belobug-AMD (0603123, 4f45ab8), GPL-3.0-or-later as this tree.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};

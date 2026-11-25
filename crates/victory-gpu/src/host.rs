@@ -2368,8 +2368,11 @@ fn late_stage() -> u8 {
             Ok("1") => 1,
             Ok("2") => 2,
             Ok("3") => 3,
-            // The relay alone: on top of stage 3.
-            Err(_) if crate::shadow::relay() => 3,
+            // The relay alone: on top of stage 3. On AMD cards only: on an
+            // RTX 2060 SUPER every frame of the world came out black with
+            // it (Series S profile, runs nvin and nvctl), and with it off
+            // the prologue draws whole at 2.6 fps (run nvlw0).
+            Err(_) if crate::shadow::relay() && host().is_some_and(|h| crate::indirect::amd(&h.device)) => 3,
             _ => 0,
         }
     })

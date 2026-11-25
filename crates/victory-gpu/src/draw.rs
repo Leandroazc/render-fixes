@@ -617,6 +617,15 @@ impl State {
     /// shortcut: the render target views are made again from the handles'
     /// descriptors as they are now, not as they were when the title set
     /// the targets (a descriptor rewritten in between names another view).
+    /// A pass of the layer's own set its pipeline, root signature and
+    /// heaps on the host list: the next draw or dispatch sets the title's
+    /// back.
+    pub(crate) fn forget_host_bindings(&mut self) {
+        self.host_pipeline = 0;
+        self.host_roots = [0; 2];
+        self.host_heaps = [0; 2];
+    }
+
     pub(crate) fn replay(&mut self, list: &HostList) {
         self.host_pipeline = 0;
         self.host_roots = [0; 2];

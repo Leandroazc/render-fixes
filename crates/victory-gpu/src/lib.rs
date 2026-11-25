@@ -56,6 +56,8 @@ pub mod signature;
 #[cfg(windows)]
 mod texture;
 #[cfg(windows)]
+pub mod upscale;
+#[cfg(windows)]
 mod watch;
 
 #[cfg(windows)]

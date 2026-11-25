@@ -27,6 +27,8 @@ pub mod media;
 #[cfg(windows)]
 pub mod net;
 pub mod speech;
+#[cfg(windows)]
+pub mod ffx;
 pub mod storage;
 pub mod xasync;
 pub mod xg;
@@ -70,5 +72,7 @@ pub(crate) fn all() -> Vec<HleModule> {
     all.push(xmem::module());
     #[cfg(windows)]
     all.push(xsystem::module());
+    #[cfg(windows)]
+    all.push(ffx::module());
     all
 }

@@ -153,6 +153,21 @@ fn with_state(this: This, f: impl FnOnce(&crate::host::HostList, &mut crate::dra
     crate::copystat::recorded(started);
 }
 
+/// Runs `f` on the host list and recording state behind title list
+/// `this` (for passes the layer records itself, `crate::upscale`); `None`
+/// without a host list.
+#[cfg(windows)]
+pub(crate) fn with_host_state<R>(
+    this: This,
+    f: impl FnOnce(&crate::host::HostList, &mut crate::draw::State) -> R,
+) -> Option<R> {
+    let mut out = None;
+    if !this.is_null() {
+        with_state(this, |list, state| out = Some(f(list, state)));
+    }
+    out
+}
+
 /// The submission of `lists` has run: each gives its descriptor tables'
 /// slots back ([`crate::draw::State::tables_done`]). A list cut at waits
 /// keeps them: its state goes with its last part.

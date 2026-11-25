@@ -354,6 +354,13 @@ fn feature_levels(data: *mut c_void) -> HRESULT {
 /// fail as they always did, with `out` null, and the first ones log the
 /// description's words and what its first word points at, so that the two
 /// methods can be written.
+/// What they take (dumped in run 2026-11-25 with `VICTORY_DUMP_UNKNOWN_PIPELINES`): the root
+/// signature, then (address, size) pairs: GFX10 machine code in GPU memory, with blocks of
+/// what looks like its resource layout and signature beside it, in a form the FSSM of shader
+/// containers does not have; none of the programs is in a container the title also uses. The
+/// title makes some 16,000 with 0x1c8 and 2,000 with 0x218 within a second of loading, and
+/// no draw of the world went without a pipeline for it in that run: it seems to make them
+/// again the usual way.
 /// shortcut: not implemented. Answering `S_OK` here without making the
 /// pipeline would hand the title whatever its stack held as an object.
 extern "system" fn unknown_pipeline<const SLOT: usize>(
@@ -388,6 +395,25 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
         let first = description
             .as_ref()
             .and_then(|w| words(w[0] as usize));
+        // Diagnostics: `VICTORY_DUMP_UNKNOWN_PIPELINES=<folder>` writes the description and the
+        // (pointer, size) pairs it seems to hold, to find out what these methods make.
+        #[cfg(all(windows, feature = "diagnostics"))]
+        if let (Some(dir), Some(w)) = (std::env::var_os("VICTORY_DUMP_UNKNOWN_PIPELINES"), &description) {
+            let dir = std::path::PathBuf::from(dir);
+            let _ = std::fs::create_dir_all(&dir);
+            let name = |what: &str| dir.join(format!("{SLOT:x}_{calls}_{what}.bin"));
+            let bytes: Vec<u8> = w.iter().flat_map(|x| x.to_le_bytes()).collect();
+            let _ = std::fs::write(name("desc"), bytes);
+            for (k, pair) in w.windows(2).enumerate() {
+                let (at, len) = (pair[0] as usize, pair[1] as usize);
+                if at > 0x1_0000 && (1..=0x10_0000).contains(&len) {
+                    let mut b = vec![0u8; len];
+                    if crate::host::read_into(at as *const u8, &mut b) {
+                        let _ = std::fs::write(name(&format!("w{k}_{at:x}")), b);
+                    }
+                }
+            }
+        }
         tracing::warn!(
             slot = format_args!("{:#x}", SLOT),
             calls,

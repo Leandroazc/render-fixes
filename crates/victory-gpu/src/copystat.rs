@@ -766,8 +766,9 @@ fn log_memory() {
     );
     tracing::info!(
         "memory of textures: {} title textures have no host copy yet ({:.0} MB of title memory); \
-         host copies the host renders to or writes: {} alive {:.0} MB; host copies the title \
-         fills: {} alive {:.0} MB ({} of them placed), {} let go {:.0} MB and {} made again \
+         host copies the host renders to or writes: {} alive {:.0} MB ({} of them {:.0} MB unused \
+         for ten seconds); host copies the title fills: {} alive {:.0} MB ({} of them {:.0} MB \
+         unused for ten seconds; {} placed), {} let go {:.0} MB and {} made again \
          {:.0} MB since the start; {} host copies made in all; passes that made none for lack of \
          room: {}; the card: {:.0} MB in use of a budget of {:.0} MB, {:.0} MB of the PC's memory \
          shared with it in use",
@@ -775,8 +776,12 @@ fn log_memory() {
         mb(census[3]),
         census[0],
         mb(census[1]),
+        census[10],
+        mb(census[11]),
         census[4],
         mb(census[5]),
+        census[12],
+        mb(census[13]),
         census[6],
         kinds[2],
         mb(kinds[3]),

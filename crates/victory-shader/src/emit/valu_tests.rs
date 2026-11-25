@@ -1264,3 +1264,262 @@ fn v_cmp_class_f16_matches_rdna2() {
         );
     });
 }
+
+#[test]
+fn v_cvt_f32_f64_rounds_to_nearest_even() {
+    // v_cvt_f32_f64 v0, v[1:2] (VOP1 opcode 0x00f): v1 low dword, v2 high.
+    let shader = build_valu_cs(&[vop1(0x00f, 0, vgpr(1))]);
+    let tie = f64::from_bits(0x3FF0_0000_1000_0000); // 1 + 2^-24: halfway, even below
+    let tie_odd = f64::from_bits(0x3FF0_0000_3000_0000); // halfway, odd below: rounds up
+    let values = [
+        0.0,
+        -0.0,
+        1.0,
+        -2.5,
+        0.1,
+        std::f64::consts::PI,
+        -1.0e30,
+        65_504.000_5,
+        tie,
+        tie_odd,
+        f64::from_bits(0x3FF0_0000_1000_0001), // just above halfway
+        f32::MAX as f64,
+        3.5e38, // above f32::MAX: infinity
+        1.0e300,
+        -1.0e300,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        1.2e-38, // just above the smallest normal f32
+    ];
+    let mut inputs: Vec<[u32; 4]> = values
+        .iter()
+        .map(|&x| {
+            let b = x.to_bits();
+            [b as u32, (b >> 32) as u32, 0, 0]
+        })
+        .collect();
+    // NaN: any NaN result.
+    inputs.push([0, 0x7FF8_0000, 0, 0]);
+    run_cases(&shader, &inputs, |backend, i, inp, got| {
+        let x = f64::from_bits(u64::from(inp[1]) << 32 | u64::from(inp[0]));
+        if x.is_nan() {
+            assert!(
+                f32::from_bits(got).is_nan(),
+                "{backend}: NaN gave {got:#010x}"
+            );
+            return;
+        }
+        let want = (x as f32).to_bits();
+        assert_eq!(
+            got,
+            want,
+            "{backend}: case {i}: v_cvt_f32_f64({x:e}) = {got:#010x} ({}), want {want:#010x} ({})",
+            f32::from_bits(got),
+            f32::from_bits(want),
+        );
+    });
+}
+
+#[test]
+fn v_permlane16_and_x16_pick_lanes_by_selector_nibbles() {
+    // 32 threads: v6 = permlane(v0 = thread id, s1, s2); s12 = v6 of lane s3.
+    for (op, cross) in [(0x377u16, false), (0x378u16, true)] {
+        let mut body = Vec::new();
+        body.extend(vop3(op, 6, vgpr(0), sgpr(1), sgpr(2)));
+        body.extend(vop3(0x360, 12, vgpr(6), sgpr(3), 0)); // v_readlane_b32 s12, v6, s3
+        body.push(vop1(0x001, 0, sgpr(12))); // v_mov_b32 v0, s12
+        // Cross-lane code declares WaveSize(32), which WARP's pipeline
+        // creation refuses: hardware only.
+        let shader = build_cs(&body, 32, 0);
+        let selectors = [
+            (0x7654_3210u32, 0xFEDC_BA98u32),
+            (0x89AB_CDEF, 0x0123_4567),
+            (0x0000_0000, 0xFFFF_FFFF),
+            (0x1F2E_3D4C, 0x5B6A_7980),
+        ];
+        let mut inputs = Vec::new();
+        for &(lo, hi) in &selectors {
+            for lane in 0..32u32 {
+                inputs.push([0, lo, hi, lane]);
+            }
+        }
+        run_cases_on(
+            &shader,
+            &inputs,
+            &[("hardware", false)],
+            |backend, _, inp, got| {
+                let (lo, hi, lane) = (inp[1], inp[2], inp[3]);
+                let sel = u64::from(lo) | u64::from(hi) << 32;
+                let pick = (sel >> (4 * (lane & 15)) & 15) as u32;
+                let base = if cross {
+                    (lane & !31) | ((lane & 16) ^ 16)
+                } else {
+                    lane & !15
+                };
+                let want = base | pick;
+                let name = if cross {
+                    "v_permlanex16_b32"
+                } else {
+                    "v_permlane16_b32"
+                };
+                assert_eq!(
+                    got, want,
+                    "{backend}: {name} lane {lane} with {lo:#010x}:{hi:#010x} read lane {got}, want {want}",
+                );
+            },
+        );
+    }
+}
+
+/// SMEM `s_load_dword{x4,x8} s[dst..], s[base:base+1], byte_off` (soffset = null).
+const fn s_load(op: u32, dst: u8, base: u8, byte_off: u32) -> [u32; 2] {
+    [
+        0x3D << 26 | op << 18 | (dst as u32) << 6 | (base as u32 >> 1),
+        125 << 25 | (byte_off & 0x1F_FFFF),
+    ]
+}
+
+#[test]
+fn an_image_descriptor_only_measured_gives_the_textures_size() {
+    // Table entry 0: a 2D texture nothing samples; entry 1: the output UAV.
+    // The code takes the width and height from the descriptor's bits, as
+    // console code does for texel sizes: width - 1 in dword 1 bits 30-31
+    // and dword 2 bits 0-13, height - 1 in dword 2 bits 14-29.
+    const S_WAITCNT_LGKM0: u32 = 0xBF8C_C07F;
+    let (lshr, lshl, or, and, add, bfe) = (0x20, 0x1E, 0x10, 0x0E, 0x02, 0x27);
+    let lit = 0xFF;
+    let mut words = vec![s_mov_b32(5, 0x80)];
+    words.extend(s_load(0x02, 8, 4, 32)); // UAV descriptor, entry 1
+    words.extend(s_load(0x03, 20, 4, 0)); // texture descriptor, entry 0
+    words.push(S_WAITCNT_LGKM0);
+    words.push(sop2(lshr, 12, 21, 0x80 + 30)); // s12 = dword1 >> 30
+    words.push(sop2(lshl, 13, 22, 0x80 + 2)); // s13 = dword2 << 2
+    words.push(sop2(or, 13, 12, 13));
+    words.extend([sop2(and, 13, 13, lit), 0xFFFF]);
+    words.push(sop2(add, 13, 13, 0x81)); // width
+    words.extend([sop2(bfe, 14, 22, lit), 16 << 16 | 14]);
+    words.push(sop2(add, 14, 14, 0x81)); // height
+    words.push(sop2(lshl, 14, 14, 0x80 + 16));
+    words.push(sop2(or, 13, 13, 14));
+    words.push(vop1(0x001, 0, sgpr(13))); // v_mov_b32 v0, s13
+    words.extend_from_slice(&buffer_store_dword(0, 8, 0));
+    words.push(S_ENDPGM);
+
+    let table = |kind, table_offset_dwords, dwords| UsedResource {
+        kind,
+        root: RootType::Table,
+        table_offset_dwords,
+        lower_bound: 0,
+        stride: 0,
+        dwords,
+        user_data: 4,
+        slot: 1,
+    };
+    let native = NativeProgram {
+        stage: HwStage::Cs,
+        wave64: false,
+        vgprs: 8,
+        layout: vec![
+            RootParam {
+                root: RootType::Constants,
+                table_offset_dwords: 0,
+                sgprs: 4,
+                base_register: 0,
+                user_data: 0,
+                slot: 0,
+            },
+            RootParam {
+                root: RootType::Table,
+                table_offset_dwords: 0,
+                sgprs: 1,
+                base_register: 0,
+                user_data: 4,
+                slot: 1,
+            },
+        ],
+        used: vec![
+            table(ResourceType::Srv, 0, 8),
+            table(ResourceType::Uav, 8, 4),
+        ],
+        io: StageIo::Cs(ComputeIo {
+            rsrc2: 5 << 1,
+            threads: [1, 1, 1],
+        }),
+        code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+    };
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    let st = structure::structure(&p).expect("structure");
+    let res =
+        resource::track(&p, &native.layout, native.stage, Some(&st)).expect("resource::track");
+    let io = io::raise(&p, &native).expect("io::raise");
+    let lowered = lower::lower(&lower::Parts {
+        native: &native,
+        p: &p,
+        st: &st,
+        io: &io,
+        res: &res,
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        prims: Vec::new(),
+        mesh_stride: 0,
+    })
+    .expect("lower");
+    let shader = HostShader {
+        stage: HwStage::Cs,
+        dxil: lowered.dxil,
+        user_data: lowered.user_data,
+        samplers: lowered.samplers,
+        static_samplers: Vec::new(),
+        root_cbvs: lowered.root_cbvs,
+        root_srvs: lowered.root_srvs,
+        root_uavs: lowered.root_uavs,
+        root_indexed_views: res.root_indexed_views,
+    };
+    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        v.validate(&mut shader.dxil.clone())
+            .expect("DXIL validation failed");
+    }
+
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ran = 0;
+    for (label, warp) in [("hardware", false), ("warp", true)] {
+        let Ok(host) = Host::new(warp) else {
+            eprintln!("no SM 6.6 {label} device; skipped");
+            continue;
+        };
+        let (root, pso) = host
+            .compute_pipeline(&shader)
+            .unwrap_or_else(|e| panic!("{label}: compute_pipeline failed: {e}"));
+        for (w, h) in [(1u32, 1u32), (7, 3), (640, 360), (1023, 1)] {
+            let texels = vec![[0.0f32; 4]; (w * h) as usize];
+            let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+            for u in &shader.user_data {
+                ud[u.index as usize] = match (u.root, u.slot) {
+                    (RootType::Constants, 0) => 0,
+                    (RootType::Table, 1) => 0,
+                    other => panic!("unexpected user data {other:?}"),
+                };
+            }
+            let out = host
+                .dispatch(
+                    &root,
+                    &pso,
+                    &Dispatch {
+                        roots: vec![(0, Root::Constants(ud))],
+                        views: &[View::Texture(w, h, &texels), View::RawUav(1)],
+                        samplers: &[],
+                        groups: [1, 1, 1],
+                    },
+                )
+                .unwrap_or_else(|e| panic!("{label}: dispatch failed: {e}"));
+            let got = out[0][0];
+            assert_eq!(
+                (got & 0xFFFF, got >> 16),
+                (w, h),
+                "{label}: a {w}x{h} texture measured from its descriptor",
+            );
+        }
+        ran += 1;
+    }
+    assert!(ran > 0, "no SM 6.6 device available");
+}

@@ -5530,7 +5530,9 @@ impl<'a> Lower<'a> {
                 .find_map(|(s, _)| use_of(*s))
         };
         let use_at = use_of(site).or_else(twin);
-        let Some((at, first)) = use_at else {
+        let (at, first) = if let Some((at, first)) = use_at {
+            (Some(at), first)
+        } else {
             // A descriptor kept per lane in VGPRs (`Resources::lane_copied`): the code only
             // copies its dwords and compares them, lane against first lane, and every load
             // that reaches those lanes reads one address. Each dword stands in as its place
@@ -5563,11 +5565,44 @@ impl<'a> Lower<'a> {
             if count <= 4
                 && let Some((lo, hi)) = self.view_address(site)
             {
+                // Its record count too where the code reads it (a test for
+                // an unbound view, which has none): the host view's size.
+                // shortcut: counted in bytes, not in records of the
+                // descriptor's stride; right for zero against nonzero.
+                let read = |v: Value| {
+                    x.p.blocks
+                        .iter()
+                        .flat_map(|b| &b.insts)
+                        .any(|i| i.reads.iter().any(|r| r.1 == v))
+                };
+                let records = match inst.write(Reg::S(code + 2)) {
+                    Some(v) if count > 2 && read(v) => {
+                        let src = Source::Loaded {
+                            load: site,
+                            first: 0,
+                        };
+                        let uav = self
+                            .used_kind(&src)
+                            .is_some_and(|u| u.kind == ResourceType::Uav);
+                        let h =
+                            self.handle(site, &src, false, (11 | if uav { 0x1000 } else { 0 }, 0))?;
+                        let c = self.cur;
+                        let i32t = self.s.t.i32;
+                        let dims = self.s.m.named_struct("dx.types.Dimensions", vec![i32t; 4]);
+                        let undef = self.s.m.undef(i32t);
+                        let d =
+                            self.s
+                                .op(c, "getDimensions", Attr::ReadOnly, dims, 72, &[h, undef]);
+                        Some(self.s.m.extract(c, d, 0))
+                    }
+                    _ => None,
+                };
                 for k in 0..count {
                     let reg = Reg::S(code + k as u8);
-                    match k {
-                        0 => self.write(inst, reg, lo, None),
-                        1 => self.write(inst, reg, hi, None),
+                    match (k, records) {
+                        (0, _) => self.write(inst, reg, lo, None),
+                        (1, _) => self.write(inst, reg, hi, None),
+                        (2, Some(n)) => self.write(inst, reg, n, None),
                         _ => {
                             if let Some(v) = inst.write(reg) {
                                 self.vals.insert(v, Val::Missing(OTHER));
@@ -5578,57 +5613,76 @@ impl<'a> Lower<'a> {
                 }
                 return Ok(());
             }
-            return Err("a descriptor read only as data");
+            // A whole image descriptor (eight dwords) that nothing samples
+            // here: the code only measures the texture (its width, height
+            // and base level, for texel sizes). Its view is taken for a 2D
+            // texture, the shape those fields have; other dwords still stop
+            // the program below.
+            if count == 8 {
+                (None, 0)
+            } else {
+                return Err("a descriptor read only as data");
+            }
         };
         let src = Source::Loaded { load: site, first };
         let used = self.used_kind(&src);
-        let ui: &Inst = &self.x.p.blocks[at.0].insts[at.1];
-        let un = ui.name();
-        let uav = un.contains("store")
-            || un.contains("atomic")
-            || used.is_some_and(|u| u.kind == ResourceType::Uav);
-        let u = if uav { 0x1000 } else { 0 };
-        let (props, image) = match &ui.fields {
-            // A ray-tracing structure in a buffer of the host: read raw.
-            Fields::Image { .. } if un.starts_with("image_bvh") => ((11, 0), None),
-            Fields::Image { dim, .. } => {
-                let kind = match dim {
-                    0 => 1,
-                    1 => 2,
-                    2 => 4,
-                    4 => 6,
-                    5 => 7,
-                    _ => return Err("an image dimension (cube or MSAA)"),
+        let (uav, props, image) = match at {
+            None => (false, (2, 0x409), Some(2)),
+            Some(at) => {
+                let ui: &Inst = &self.x.p.blocks[at.0].insts[at.1];
+                let un = ui.name();
+                let uav = un.contains("store")
+                    || un.contains("atomic")
+                    || used.is_some_and(|u| u.kind == ResourceType::Uav);
+                let u = if uav { 0x1000 } else { 0 };
+                let (props, image) = match &ui.fields {
+                    // A ray-tracing structure in a buffer of the host: read raw.
+                    Fields::Image { .. } if un.starts_with("image_bvh") => ((11, 0), None),
+                    Fields::Image { dim, .. } => {
+                        let kind = match dim {
+                            0 => 1,
+                            1 => 2,
+                            2 => 4,
+                            4 => 6,
+                            5 => 7,
+                            _ => return Err("an image dimension (cube or MSAA)"),
+                        };
+                        ((kind | u, 0x409), Some(kind))
+                    }
+                    Fields::Buffer { idxen, format, .. } => {
+                        let stride = used.map_or(0, |u| u.stride);
+                        let props = if un.starts_with("buffer_load_format")
+                            || un.starts_with("buffer_store_format")
+                        {
+                            (10 | u, 0x409)
+                        } else if *idxen
+                            && format.is_none()
+                            && stride >= 4
+                            && stride.is_multiple_of(4)
+                        {
+                            (12 | u, stride)
+                        } else {
+                            (11 | u, 0)
+                        };
+                        if used.is_some_and(|u| u.kind == ResourceType::Cbv) {
+                            self.stale.extend(inst.writes.iter().map(|w| w.1));
+                            return Err("a constant buffer's descriptor read as data");
+                        }
+                        (props, None)
+                    }
+                    // Read by scalar buffer loads alone: the raw view `smem` reads it through.
+                    Fields::Smem { .. } if used.is_some_and(|u| u.kind == ResourceType::Srv) => {
+                        ((11, 0), None)
+                    }
+                    // A constant buffer: nothing of its descriptor is a number.
+                    Fields::Smem { .. } => {
+                        self.stale.extend(inst.writes.iter().map(|w| w.1));
+                        return Err("a constant buffer's descriptor read as data");
+                    }
+                    _ => return Err("a scalar memory read as data"),
                 };
-                ((kind | u, 0x409), Some(kind))
+                (uav, props, image)
             }
-            Fields::Buffer { idxen, format, .. } => {
-                let stride = used.map_or(0, |u| u.stride);
-                let props = if un.starts_with("buffer_load_format")
-                    || un.starts_with("buffer_store_format")
-                {
-                    (10 | u, 0x409)
-                } else if *idxen && format.is_none() && stride >= 4 && stride.is_multiple_of(4) {
-                    (12 | u, stride)
-                } else {
-                    (11 | u, 0)
-                };
-                if used.is_some_and(|u| u.kind == ResourceType::Cbv) {
-                    self.stale.extend(inst.writes.iter().map(|w| w.1));
-                    return Err("a constant buffer's descriptor read as data");
-                }
-                (props, None)
-            }
-            // Read by scalar buffer loads alone: the raw view `smem` reads it through.
-            Fields::Smem { .. } if used.is_some_and(|u| u.kind == ResourceType::Srv) => {
-                ((11, 0), None)
-            }
-            // A constant buffer: nothing of its descriptor is a number.
-            Fields::Smem { .. } => {
-                self.stale.extend(inst.writes.iter().map(|w| w.1));
-                return Err("a constant buffer's descriptor read as data");
-            }
-            _ => return Err("a scalar memory read as data"),
         };
         let h = self.handle(site, &src, false, props)?;
         let c = self.cur;
@@ -6981,6 +7035,82 @@ impl<'a> Lower<'a> {
                 let r = self.s.m.cast(c, op, a, self.s.t.i32);
                 int(self, r)
             }
+            "v_permlane16_b32" | "v_permlanex16_b32" => {
+                // Lane i of each 16-lane row reads lane `nibble i of
+                // {src2, src1}` of its own row (permlane16) or of the
+                // other row of its 32-lane half (permlanex16).
+                // shortcut: a source lane that is inactive gives what the
+                // host reads there; the FI and bound_ctrl bits (op_sel) that
+                // choose the console's answer are not followed.
+                let Some(&Operand::Vector { reg, .. }) = v.src.first() else {
+                    return Err("a permlane operand outside a VGPR");
+                };
+                let x = self.i32_of(inst.read(Reg::V(reg)).ok_or("an unread operand")?)?;
+                let (s1, s2) = (s(self, 1)?, s(self, 2)?);
+                self.cross_lane(false)?;
+                let lane = self.lane_index();
+                let k = |l: &mut Self, n: u32| l.s.m.i32(n);
+                let (k15, k8, k7, k2) = (k(self, 15), k(self, 8), k(self, 7), k(self, 2));
+                let pos = self.s.m.bin(c, Bin::And, lane, k15);
+                let high = self.s.m.cmp(c, pred::IUGE, pos, k8);
+                let sel = self.s.m.select(c, high, s2, s1);
+                let p = self.s.m.bin(c, Bin::And, lane, k7);
+                let sh = self.s.m.bin(c, Bin::Shl, p, k2);
+                let pick = self.s.m.bin(c, Bin::LShr, sel, sh);
+                let pick = self.s.m.bin(c, Bin::And, pick, k15);
+                let base = if name == "v_permlanex16_b32" {
+                    let (not31, k16) = (k(self, !31), k(self, 16));
+                    let half = self.s.m.bin(c, Bin::And, lane, not31);
+                    let row = self.s.m.bin(c, Bin::And, lane, k16);
+                    let other = self.s.m.bin(c, Bin::Xor, row, k16);
+                    self.s.m.bin(c, Bin::Or, half, other)
+                } else {
+                    let not15 = k(self, !15);
+                    self.s.m.bin(c, Bin::And, lane, not15)
+                };
+                let src = self.s.m.bin(c, Bin::Or, base, pick);
+                let r = self.read_lane(x, src);
+                int(self, r)
+            }
+            "v_cvt_f32_f64" => {
+                // The f64 source is a register pair converted with 32-bit
+                // integer arithmetic (no doubles in the module); inline
+                // float constants are the same values as f32.
+                if v.sdwa.is_some() || v.dpp.is_some() {
+                    return Err("64-bit operand modifiers");
+                }
+                let op = *v.src.first().ok_or("a missing operand")?;
+                let pair = match op {
+                    Operand::Vector { reg, .. } => Some((Reg::V(reg), Reg::V(reg + 1))),
+                    Operand::Scalar { code, .. } if code != NULL => {
+                        Some((Reg::S(code), Reg::S(code + 1)))
+                    }
+                    Operand::Const(240..=248) => None,
+                    _ => return Err("a 64-bit float operand other than a register pair"),
+                };
+                let mut r = match pair {
+                    Some((r0, r1)) => {
+                        let lo = self.i32_of(inst.read(r0).ok_or("an unread operand")?)?;
+                        let hi = self.i32_of(inst.read(r1).ok_or("an unread operand")?)?;
+                        let bits = self.f64_bits_to_f32(lo, hi);
+                        self.as_float(bits)
+                    }
+                    None => {
+                        let x = self.operand(inst, &op)?;
+                        self.as_float(x)
+                    }
+                };
+                // Conversion is symmetric in the sign, so source modifiers
+                // apply to the result.
+                if v.abs & 1 != 0 {
+                    r = self.unary(6, r);
+                }
+                if v.neg & 1 != 0 {
+                    let z = self.s.m.f32(0x8000_0000);
+                    r = self.s.m.bin(c, Bin::Sub, z, r);
+                }
+                float(self, r)
+            }
             "v_cvt_f32_i32" | "v_cvt_f32_u32" | "v_cvt_f32_ubyte0" | "v_cvt_f32_ubyte1"
             | "v_cvt_f32_ubyte2" | "v_cvt_f32_ubyte3" => {
                 let mut a = s(self, 0)?;
@@ -7366,6 +7496,56 @@ impl<'a> Lower<'a> {
         let shift = self.s.m.int_const(ty, 32);
         let hi = self.s.m.bin(c, Bin::Shl, hi, shift);
         self.s.m.bin(c, Bin::Or, lo, hi)
+    }
+
+    /// The f32 bits of the f64 whose bits are `hi:lo`, rounded to nearest
+    /// even: out of range gives infinity, NaN stays a (quiet) NaN.
+    /// shortcut: results below the smallest normal f32 flush to a signed
+    /// zero instead of becoming denormals.
+    fn f64_bits_to_f32(&mut self, lo: V, hi: V) -> V {
+        let c = self.cur;
+        let k = |l: &mut Self, x: u32| l.s.m.i32(x);
+        let (k20, k3, k29, k23) = (k(self, 20), k(self, 3), k(self, 29), k(self, 23));
+        let sign_mask = k(self, 0x8000_0000);
+        let sign = self.s.m.bin(c, Bin::And, hi, sign_mask);
+        let e = self.s.m.bin(c, Bin::LShr, hi, k20);
+        let e_mask = k(self, 0x7FF);
+        let e = self.s.m.bin(c, Bin::And, e, e_mask);
+        // The top 23 of the 52 fraction bits, and the 29 below them.
+        let frac_mask = k(self, 0xF_FFFF);
+        let frac_hi = self.s.m.bin(c, Bin::And, hi, frac_mask);
+        let top = self.s.m.bin(c, Bin::Shl, frac_hi, k3);
+        let lo_top = self.s.m.bin(c, Bin::LShr, lo, k29);
+        let mant = self.s.m.bin(c, Bin::Or, top, lo_top);
+        let rem_mask = k(self, 0x1FFF_FFFF);
+        let rem = self.s.m.bin(c, Bin::And, lo, rem_mask);
+        // Rebiased exponent (1023 -> 127); a carry out of the rounding
+        // moves into the exponent, up to infinity.
+        let bias = k(self, 896);
+        let eb = self.s.m.bin(c, Bin::Sub, e, bias);
+        let shifted = self.s.m.bin(c, Bin::Shl, eb, k23);
+        let normal = self.s.m.bin(c, Bin::Or, shifted, mant);
+        let one = k(self, 1);
+        let odd = self.s.m.bin(c, Bin::And, mant, one);
+        let tie = self.s.m.bin(c, Bin::Add, rem, odd);
+        let half = k(self, 0x1000_0000);
+        let up = self.s.m.cmp(c, pred::IUGT, tie, half);
+        let zero = k(self, 0);
+        let inc = self.s.m.select(c, up, one, zero);
+        let rounded = self.s.m.bin(c, Bin::Add, normal, inc);
+        let inf = k(self, 0x7F80_0000);
+        let k255 = k(self, 255);
+        let big = self.s.m.cmp(c, pred::SGE, eb, k255);
+        let mag = self.s.m.select(c, big, inf, rounded);
+        let small = self.s.m.cmp(c, pred::SLE, eb, zero);
+        let mag = self.s.m.select(c, small, zero, mag);
+        let nan_e = self.s.m.cmp(c, pred::EQ, e, e_mask);
+        let frac_any = self.s.m.bin(c, Bin::Or, frac_hi, lo);
+        let is_nan_frac = self.s.m.cmp(c, pred::NE, frac_any, zero);
+        let qnan = k(self, 0x7FC0_0000);
+        let special = self.s.m.select(c, is_nan_frac, qnan, inf);
+        let mag = self.s.m.select(c, nan_e, special, mag);
+        self.s.m.bin(c, Bin::Or, mag, sign)
     }
 
     /// The low and high dwords of an i64.

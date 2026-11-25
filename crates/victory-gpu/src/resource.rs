@@ -269,7 +269,10 @@ pub(crate) fn pc_format(format: u32) -> u32 {
 /// The title also renders to R9G9B9E5 (67), which no PC GPU does: 16-bit
 /// float RGBA stands in, with at least R9G9B9E5's precision and range.
 /// The title's pipelines and views of such targets name the stand-in too
-/// ([`view_format`], the host view checks).
+/// ([`view_format`], the host view checks). Shared-exponent R9G9B9E5 (67),
+/// which no PC GPU renders to or writes, has R11G11B10_FLOAT: the same size,
+/// three floats (on Series S the upscaler's output is one, 1920x1080; its
+/// host copy was refused and the device removed right after).
 /// shortcut: copies between such a target and a texture the title fills
 /// itself in the 16-bit format are skipped ([`stands_in`]); convert them
 /// if a pass turns out to need one.

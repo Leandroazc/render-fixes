@@ -418,6 +418,13 @@ struct LateDlls {
     lock: LoaderLock,
 }
 
+/// Whether `VICTORY_REFUSE_DLLS` names `file` (any case).
+#[cfg(windows)]
+fn refused_dll(file: &str) -> bool {
+    std::env::var("VICTORY_REFUSE_DLLS")
+        .is_ok_and(|list| list.split(',').any(|name| name.trim().eq_ignore_ascii_case(file)))
+}
+
 #[cfg(windows)]
 impl LateDlls {
     /// Every `LoadLibrary` of the title comes here first. Returns a title
@@ -430,6 +437,12 @@ impl LateDlls {
         show: impl Fn(&str, victory_loader::BindReport),
     ) -> Result<Option<usize>> {
         use victory_hle::runtime::{forget_image, image_named, set_image_path};
+        // `VICTORY_REFUSE_DLLS` (comma-separated names): those loads fail as
+        // for a DLL not there. On Series S the title loads AMD's upscaler,
+        // whose programs come as AMD's own precompiled code, not translated.
+        if refused_dll(file) {
+            anyhow::bail!("refused (VICTORY_REFUSE_DLLS)");
+        }
         // Waits while another thread initialises a DLL; a `DllMain` that
         // loads another DLL re-enters.
         self.lock.hold(|| {

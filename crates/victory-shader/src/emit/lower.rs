@@ -986,6 +986,7 @@ fn lds_meetings(
             let defs = defs.get_or_insert_with(|| value_defs(p));
             accesses[r].push(LdsAccess {
                 block: b,
+                offset: i.machine.offset,
                 read,
                 write,
                 bytes: lds_bytes(i, defs),
@@ -999,21 +1000,27 @@ fn lds_meetings(
         let acc = &accesses[r];
         // an access of one instruction is the console's too; atomics among themselves keep
         // the console's results up to the order of lanes, which it does not promise either
-        let clash = acc.iter().enumerate().any(|(x, a)| {
-            acc.iter().enumerate().any(|(y, w)| {
-                x != y
-                    && a.read
-                    && w.write
-                    && !(a.write && w.read)
-                    && match (&a.bytes, &w.bytes) {
-                        (Some(ra), Some(rw)) => ra.iter().any(|&(s, e)| rw.iter().any(|&(t, f)| s < f && t < e)),
-                        _ => true,
-                    }
-            })
+        let clash = acc.iter().enumerate().find_map(|(x, a)| {
+            acc.iter()
+                .enumerate()
+                .find(|&(y, w)| {
+                    x != y
+                        && a.read
+                        && w.write
+                        && !(a.write && w.read)
+                        && match (&a.bytes, &w.bytes) {
+                            (Some(ra), Some(rw)) => ra.iter().any(|&(s, e)| rw.iter().any(|&(t, f)| s < f && t < e)),
+                            _ => true,
+                        }
+                })
+                .map(|(_, w)| (a.offset, w.offset))
         });
-        if clash {
+        if let Some((read, write)) = clash {
             let defs = defs.get_or_insert_with(|| value_defs(p));
             if !acc.iter().all(|a| one_thread(st, st.reach[a.block], p, defs, threads)) {
+                if std::env::var_os("VICTORY_WAVE_WHY").is_some() {
+                    eprintln!("WAVE64-LDS read at {read:#x} may meet the write at {write:#x}");
+                }
                 return None;
             }
         }
@@ -1037,6 +1044,8 @@ fn lds_meetings(
 #[derive(Debug, Clone)]
 struct LdsAccess {
     block: usize,
+    /// Of the machine instruction.
+    offset: usize,
     read: bool,
     write: bool,
     /// The byte ranges it touches, where its address is a constant.

@@ -487,9 +487,17 @@ pub fn emit(
         // without any branch that only skips code no lane is left for.
         let form = |p: Option<ir::Program>| {
             p.and_then(|p| {
-                let st = structure::structure(&p).ok()?;
-                let io = io::raise(&p, native).ok()?;
-                let res = resource::track(&p, &native.layout, native.stage, Some(&st)).ok()?;
+                // (`VICTORY_WAVE_WHY`: which stage leaves the form out)
+                let fail = |stage: &str, e: ShaderError| {
+                    if why {
+                        eprintln!("WAVE64-FORM {stage}: {e}");
+                    }
+                };
+                let st = structure::structure(&p).map_err(|e| fail("structure", e)).ok()?;
+                let io = io::raise(&p, native).map_err(|e| fail("io", e)).ok()?;
+                let res = resource::track(&p, &native.layout, native.stage, Some(&st))
+                    .map_err(|e| fail("resources", e))
+                    .ok()?;
                 Some((p, st, io, res))
             })
         };
@@ -590,6 +598,19 @@ pub fn emit(
                 report("local waves (APPROXIMATE, any mask)", &local);
                 if done(&local) {
                     return local.map(|(shader, _)| shader);
+                }
+            }
+        }
+        // `VICTORY_WAVE_WIDE=last`: the wave-wide branches only for a program every other form
+        // leaves at 64 lanes, which the host refuses: one that has another form keeps it (with
+        // `=1` the title's `2561af9577c47289` took this form first and lost the card).
+        if std::env::var_os("VICTORY_WAVE_WIDE").is_some_and(|v| v == "last") {
+            let bases = [forms[1].1.as_ref().map(|f| &f.0), forms[0].1.as_ref().map(|f| &f.0), Some(p)];
+            if let Some(base) = bases.into_iter().flatten().next() {
+                let again = widen(c, native, base, why);
+                report("wave-wide branches, last", &again);
+                if done(&again) {
+                    return again.map(|(shader, _)| shader);
                 }
             }
         }

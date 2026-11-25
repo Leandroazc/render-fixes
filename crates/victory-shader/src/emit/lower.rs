@@ -1992,7 +1992,25 @@ impl<'a> Lower<'a> {
             .get(&mask)
             .ok_or("a wave reduction's untracked mask")?;
         let on = self.boolean(m, c)?;
-        let x = self.i32_of(src)?;
+        // A sum of 64-bit floats: summed as f32 and widened back, the dword asked for taken
+        // (`high`). shortcut: the terms and the sum have f32's precision and range, not f64's
+        // (the title's 5dc3b25986622949 and 6f225b641c5b0708 count lanes with 1.0 and take the
+        // sum to f32 at once).
+        let mut double = None;
+        let (op, src_x, ident) = match op {
+            Op::AddDLo(hi) | Op::AddDHi(hi) => {
+                let high = matches!(op, Op::AddDHi(_));
+                let (lo, hi) = if high { (hi, src) } else { (src, hi) };
+                if prefix.is_some() {
+                    return Err("a wave prefix of 64-bit floats");
+                }
+                let (lo, hi) = (self.i32_of(lo)?, self.i32_of(hi)?);
+                double = Some(high);
+                (Op::AddF, self.f64_bits_to_f32(lo, hi), 0)
+            }
+            _ => (op, self.i32_of(src)?, ident),
+        };
+        let x = src_x;
         let id = self.s.m.i32(ident);
         let x = self.s.m.select(c, on, x, id);
         self.s.flags |= flags::WAVE_OPS;
@@ -2115,7 +2133,44 @@ impl<'a> Lower<'a> {
         } else {
             r
         };
-        Ok(if float { self.as_int(r) } else { r })
+        let r = if float { self.as_int(r) } else { r };
+        Ok(match double {
+            Some(high) => {
+                let (lo, hi) = self.f32_bits_to_f64(r);
+                if high { hi } else { lo }
+            }
+            None => r,
+        })
+    }
+
+    /// The (low, high) dwords of the f64 the f32 bits `x` hold, exactly.
+    /// shortcut: an f32 denormal becomes a signed zero.
+    fn f32_bits_to_f64(&mut self, x: V) -> (V, V) {
+        let c = self.cur;
+        let k = |l: &mut Self, v: u32| l.s.m.i32(v);
+        let (k23, k20, k3, k29) = (k(self, 23), k(self, 20), k(self, 3), k(self, 29));
+        let sign_mask = k(self, 0x8000_0000);
+        let sign = self.s.m.bin(c, Bin::And, x, sign_mask);
+        let e = self.s.m.bin(c, Bin::LShr, x, k23);
+        let ff = k(self, 0xFF);
+        let e = self.s.m.bin(c, Bin::And, e, ff);
+        let m_mask = k(self, 0x7F_FFFF);
+        let m = self.s.m.bin(c, Bin::And, x, m_mask);
+        // 127 -> 1023; infinity and NaN keep the all-ones exponent
+        let bias = k(self, 896);
+        let rebiased = self.s.m.bin(c, Bin::Add, e, bias);
+        let all = k(self, 0x7FF);
+        let special = self.s.m.cmp(c, pred::EQ, e, ff);
+        let eb = self.s.m.select(c, special, all, rebiased);
+        let ex = self.s.m.bin(c, Bin::Shl, eb, k20);
+        let top = self.s.m.bin(c, Bin::LShr, m, k3);
+        let hi = self.s.m.bin(c, Bin::Or, ex, top);
+        let lo = self.s.m.bin(c, Bin::Shl, m, k29);
+        let zero = k(self, 0);
+        let tiny = self.s.m.cmp(c, pred::EQ, e, zero);
+        let hi = self.s.m.select(c, tiny, zero, hi);
+        let lo = self.s.m.select(c, tiny, zero, lo);
+        (lo, self.s.m.bin(c, Bin::Or, hi, sign))
     }
 
     /// The sum of two 16-bit floats (the low halves of `a` and `b`) as the console's

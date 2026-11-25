@@ -25,6 +25,11 @@ pub(crate) enum Op {
     /// bits: not associative, so only the balanced tree over the lanes in their order is
     /// followed (see [`buddies`]), which is how the compiler sums a wave.
     AddH,
+    /// The low dword of a sum of 64-bit floats (`v_add_f64` on register pairs): the value is
+    /// this dword's source, the one held is the high dword's source.
+    AddDLo(Value),
+    /// The high dword of that sum; the one held is the low dword's source.
+    AddDHi(Value),
     MinU,
     MaxU,
     MinI,
@@ -61,7 +66,8 @@ impl Op {
     fn identity(self, k: u32) -> bool {
         match self {
             Op::AddU | Op::AddH | Op::Or | Op::Xor | Op::MaxU => k == 0,
-            Op::AddF => k == 0 || k == 0x8000_0000,
+            Op::AddF | Op::AddDHi(_) => k == 0 || k == 0x8000_0000,
+            Op::AddDLo(_) => k == 0,
             Op::MinU | Op::And => k == u32::MAX,
             Op::MinI => k == 0x7FFF_FFFF,
             Op::MaxI => k == 0x8000_0000,
@@ -72,7 +78,10 @@ impl Op {
 
     /// Counting a lane twice changes the result.
     fn counts(self) -> bool {
-        matches!(self, Op::AddU | Op::AddF | Op::AddH | Op::Xor)
+        matches!(
+            self,
+            Op::AddU | Op::AddF | Op::AddH | Op::AddDLo(_) | Op::AddDHi(_) | Op::Xor
+        )
     }
 }
 
@@ -305,6 +314,14 @@ fn simulate(insts: &[Inst], wave: u32, saved: Value) -> HashMap<Value, Shape> {
             {
                 masked.push(w);
             }
+            // a copy of a scalar (the compiler moves a sum's dwords where it keeps them)
+            if name == "s_mov_b32"
+                && let (Some(&Operand::Scalar { code, .. }), Some(&(_, w))) = (src.first(), inst.writes.first())
+                && let Some(x) = inst.read(Reg::S(code))
+            {
+                uni.insert(w, uni.get(&x).copied().unwrap_or(Sym::Uni(x)));
+                continue;
+            }
             for &(_, w) in &inst.writes {
                 uni.entry(w).or_insert(Sym::Unknown);
             }
@@ -357,6 +374,10 @@ fn simulate(insts: &[Inst], wave: u32, saved: Value) -> HashMap<Value, Shape> {
                     .unwrap_or(Sym::Unknown);
                 uni.insert(w, s);
             }
+            continue;
+        }
+        if name == "v_add_f64" {
+            add_f64(inst, v, &lanes(&Operand::Const(128), &vec, &uni), exec, &mut vec, &uni, wave);
             continue;
         }
         let Some(Operand::Vector { reg: dreg, .. }) = v.dst else {
@@ -515,6 +536,119 @@ fn simulate(insts: &[Inst], wave: u32, saved: Value) -> HashMap<Value, Shape> {
         vec.insert(dst, merged);
     }
     shapes(vec, uni, wave)
+}
+
+/// `v_add_f64` on the console's lanes: each lane's register pair as two dwords of one sum
+/// ([`Op::AddDLo`], [`Op::AddDHi`]). `zero` is every lane's +0.
+fn add_f64(
+    inst: &Inst,
+    v: &crate::gfx10::Valu,
+    zero: &[Sym],
+    exec: u64,
+    vec: &mut HashMap<Value, Vec<Sym>>,
+    uni: &HashMap<Value, Sym>,
+    wave: u32,
+) {
+    let n = wave as usize;
+    let unknown = || vec![Sym::Unknown; n];
+    let (Some(Operand::Vector { reg: d, .. }), Some(lo_w), Some(hi_w)) = (v.dst, inst.writes.first(), inst.writes.get(1))
+    else {
+        return;
+    };
+    let (lo_w, hi_w) = (inst.write(Reg::V(d)).unwrap_or(lo_w.1), inst.write(Reg::V(d + 1)).unwrap_or(hi_w.1));
+    let modifiers = v.abs != 0 || v.neg != 0 || v.clamp || v.omod != 0 || v.sdwa.is_some() || v.dpp.is_some();
+    // A source as (low, high) dwords per lane.
+    let pair = |op: &Operand, vec: &HashMap<Value, Vec<Sym>>| -> (Vec<Sym>, Vec<Sym>) {
+        let one = |r: Reg| match inst.read(r) {
+            Some(x) => match r {
+                Reg::V(_) => vec.get(&x).cloned().unwrap_or_else(|| vec![Sym::Own(x); n]),
+                _ => vec![uni.get(&x).copied().unwrap_or(Sym::Uni(x)); n],
+            },
+            None => unknown(),
+        };
+        match *op {
+            Operand::Vector { reg, .. } => (one(Reg::V(reg)), one(Reg::V(reg + 1))),
+            Operand::Scalar { code, .. } if code != NULL => (one(Reg::S(code)), one(Reg::S(code + 1))),
+            Operand::Const(128) => (zero.to_vec(), zero.to_vec()),
+            _ => (unknown(), unknown()),
+        }
+    };
+    let old = pair(&Operand::Vector { reg: d, dwords: 2 }, vec);
+    let (a, b) = match (v.src.first(), v.src.get(1)) {
+        (Some(x), Some(y)) if !modifiers => (pair(x, vec), pair(y, vec)),
+        _ => {
+            vec.insert(lo_w, unknown());
+            vec.insert(hi_w, unknown());
+            return;
+        }
+    };
+    // (low, high) of a lane's term or partial sum: its sources, mask, identities and lanes
+    let parts = |lo: Sym, hi: Sym| match (lo, hi) {
+        (
+            Sym::Red {
+                op: ol,
+                src: sl,
+                mask: ml,
+                ident: il,
+                lanes: ll,
+            },
+            Sym::Red {
+                op: oh,
+                src: sh,
+                mask: mh,
+                ident: ih,
+                lanes: lh,
+            },
+        ) if ml == mh
+            && ll == lh
+            && ol.is_none_or(|o| o == Op::AddDLo(sh))
+            && oh.is_none_or(|o| o == Op::AddDHi(sl))
+            && Op::AddDLo(sh).identity(il)
+            && Op::AddDHi(sl).identity(ih) =>
+        {
+            Some((sl, sh, ml, il, ih, ll))
+        }
+        _ => None,
+    };
+    let is_zero = |lo: Sym, hi: Sym| matches!((lo, hi), (Sym::K(0), Sym::K(0 | 0x8000_0000)));
+    let mut lo_out = Vec::with_capacity(n);
+    let mut hi_out = Vec::with_capacity(n);
+    for l in 0..n {
+        let (alo, ahi, blo, bhi) = (a.0[l], a.1[l], b.0[l], b.1[l]);
+        let r = if is_zero(alo, ahi) {
+            (blo, bhi)
+        } else if is_zero(blo, bhi) {
+            (alo, ahi)
+        } else {
+            match (parts(alo, ahi), parts(blo, bhi)) {
+                (Some(x), Some(y)) if (x.0, x.1, x.2, x.3, x.4) == (y.0, y.1, y.2, y.3, y.4) && x.5 & y.5 == 0 => {
+                    let (sl, sh, mask, il, ih, lanes) = (x.0, x.1, x.2, x.3, x.4, x.5 | y.5);
+                    (
+                        Sym::Red {
+                            op: Some(Op::AddDLo(sh)),
+                            src: sl,
+                            mask,
+                            ident: il,
+                            lanes,
+                        },
+                        Sym::Red {
+                            op: Some(Op::AddDHi(sl)),
+                            src: sh,
+                            mask,
+                            ident: ih,
+                            lanes,
+                        },
+                    )
+                }
+                _ => (Sym::Unknown, Sym::Unknown),
+            }
+        };
+        let on = exec >> l & 1 != 0;
+        lo_out.push(if on { r.0 } else { old.0[l] });
+        hi_out.push(if on { r.1 } else { old.1[l] });
+    }
+    vec.insert(lo_w, lo_out);
+    vec.insert(hi_w, hi_out);
 }
 
 fn constant(inst: &Inst) -> Option<u64> {
@@ -908,6 +1042,63 @@ mod tests {
             );
             assert_eq!(sec.shapes.get(&v4_val), None);
         }
+    }
+
+    /// `WaveActiveSum` of a double (v[19:20]) into s[12:13], as compiled in the title's
+    /// 5dc3b25986622949 (0x5d0 on): the low and high dwords of the pairs are followed together.
+    #[test]
+    fn a_sum_of_doubles_over_the_wave_is_followed_by_its_dword_pairs() {
+        // v_mov_b32 v<dst>, v<src> with DPP (`ctl`: 0xE9 dpp8, 0xFA dpp16)
+        let mov = |dst: u32, src: u32, ctl: u32, dpp: u32| [0x7E00_0200 | dst << 17 | ctl, dpp | src];
+        let mut words = vec![
+            0xBE84_25C1, // s_or_saveexec_b64 s[4:5], -1
+            0x7E04_0280, // v_mov_b32 v2, 0
+            0x7E06_0280, // v_mov_b32 v3, 0
+            0xD501_0002,
+            0x0012_2702, // v_cndmask_b32 v2, v2, v19, s[4:5]
+            0xD501_0003,
+            0x0012_2903, // v_cndmask_b32 v3, v3, v20, s[4:5]
+        ];
+        let add = [0xD564_0002, 0x0002_0504]; // v_add_f64 v[2:3], v[4:5], v[2:3]
+        // dpp8 [1,0,3,2,5,4,7,6], [2,2,0,0,6,6,4,4], [4,4,4,4,0,0,0,0]; then row_mirror
+        for sel in [0xDE54_C100u32, 0x9360_1200, 0x0009_2400] {
+            words.extend(mov(4, 2, 0xE9, sel));
+            words.extend(mov(5, 3, 0xE9, sel));
+            words.extend(add);
+        }
+        words.extend(mov(4, 2, 0xFA, 0xFF09_4000));
+        words.extend(mov(5, 3, 0xFA, 0xFF09_4000));
+        words.extend(add);
+        words.extend([
+            0xD778_0004,
+            0x0201_0102, // v_permlanex16_b32 v4, v2, 0, 0
+            0xD778_0005,
+            0x0201_0103, // v_permlanex16_b32 v5, v3, 0, 0
+            add[0],
+            add[1],
+            0xD760_0008,
+            0x0001_4102, // v_readlane_b32 s8, v2, 32
+            0xD760_0009,
+            0x0001_4103, // v_readlane_b32 s9, v3, 32
+            0xD564_0002,
+            0x0002_0408, // v_add_f64 v[2:3], s[8:9], v[2:3]
+            0xD760_0008,
+            0x0001_0102, // v_readlane_b32 s8, v2, 0
+            0xD760_0009,
+            0x0001_0103, // v_readlane_b32 s9, v3, 0
+            0xBE8C_0308, // s_mov_b32 s12, s8
+            0xBE8D_0309, // s_mov_b32 s13, s9
+            0xBEFE_0404, // s_mov_b64 exec, s[4:5]
+        ]);
+        let p = build(&words, true);
+        let insts = &p.blocks[0].insts;
+        let saved = insts[0].write(Reg::S(4)).unwrap();
+        let input = |r: u8| p.inputs.iter().find_map(|&(x, v)| (x == Reg::V(r)).then_some(v)).unwrap();
+        let (v19, v20) = (input(19), input(20));
+        let written = |r: u8| insts.iter().rev().find_map(|i| i.write(Reg::S(r))).unwrap();
+        let sec = &sections(&p, 0)[&0];
+        assert_eq!(sec.shapes.get(&written(12)), Some(&Shape::Active(Op::AddDLo(v20), v19, saved, 0)));
+        assert_eq!(sec.shapes.get(&written(13)), Some(&Shape::Active(Op::AddDHi(v19), v20, saved, 0)));
     }
 
     /// `WaveActiveSum` of 16-bit floats, as compiled in

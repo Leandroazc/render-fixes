@@ -219,11 +219,23 @@ fn card_limits() -> (u64, u64) {
     *LIMITS.get_or_init(|| {
         let env_mb = |name: &str| std::env::var(name).ok().and_then(|v| v.trim().parse::<u64>().ok());
         let vram_budget = crate::host::host().and_then(|h| h.video_memory()).map(|[budget, ..]| budget);
-        let (mut min_bytes, max_bytes) = resolve_card_limits(
+        let (mut min_bytes, mut max_bytes) = resolve_card_limits(
             vram_budget,
             env_mb("VICTORY_CARD_BUFFERS_MIN_MB"),
             env_mb("VICTORY_CARD_BUFFERS_MB"),
         );
+        // Off AMD: every title buffer from 64 KiB, up to 1 GiB of them. On
+        // an RTX 2060 SUPER (Series S profile, with windows on the card too)
+        // the card's time went from 189 ms a frame to 105, the frame from
+        // 386 ms to 252: shaders had read them over the bus.
+        if !amd_card() {
+            if env_mb("VICTORY_CARD_BUFFERS_MIN_MB").is_none() {
+                min_bytes = 64 << 10;
+            }
+            if env_mb("VICTORY_CARD_BUFFERS_MB").is_none() {
+                max_bytes = max_bytes.max(1 << 30);
+            }
+        }
         // `VICTORY_CARD_BUFFERS_MIN_KB` (after fxceless c36971b2) says the
         // least size in KiB, so that it can go under 1 MiB: 64 is every title
         // buffer. Copies under 1 MiB are nearly all there are and few bytes;
@@ -447,9 +459,16 @@ fn card_room_for(size: u64) -> Option<ID3D12Resource> {
 /// alone; what moves is what shaders read.
 fn window_card_most() -> u64 {
     static MOST: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    // Off AMD 2,048 MB by default ([`card_limits`] says why).
     *MOST.get_or_init(|| {
-        std::env::var("VICTORY_CARD_WINDOWS_MB").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0) << 20
+        let default = if amd_card() { 0 } else { 2048 };
+        std::env::var("VICTORY_CARD_WINDOWS_MB").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(default) << 20
     })
+}
+
+/// Whether the host card is AMD's (or not known yet: as before).
+fn amd_card() -> bool {
+    host().is_none_or(|h| crate::indirect::amd(&h.device))
 }
 
 /// Bytes alive of windows' card sides ([`window_card_most`]).

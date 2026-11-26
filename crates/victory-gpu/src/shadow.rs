@@ -223,16 +223,18 @@ fn card_limits() -> (u64, u64) {
             std::env::var("VICTORY_CARD_BUFFERS_MIN_MB").ok().as_deref().and_then(parse_mib),
             explicit_card_buffers_mb(),
         );
-        // Off AMD: every title buffer from 64 KiB, up to 1 GiB of them. On
+        // Off AMD: every title buffer from 64 KiB, up to 2 GiB of them. On
         // an RTX 2060 SUPER (Series S profile, with windows on the card too)
         // the card's time went from 189 ms a frame to 105, the frame from
-        // 386 ms to 252: shaders had read them over the bus.
+        // 386 ms to 252: shaders had read them over the bus. With 2 GiB of
+        // buffers and 3 GiB of windows the card's time went down to 64-68 ms
+        // (late wait stage 1, 5 fps); with windows alone it was 161-171.
         if !amd_card() {
             if env_mb("VICTORY_CARD_BUFFERS_MIN_MB").is_none() {
                 min_bytes = 64 << 10;
             }
             if env_mb("VICTORY_CARD_BUFFERS_MB").is_none() {
-                max_bytes = max_bytes.max(1 << 30);
+                max_bytes = max_bytes.max(2 << 30);
             }
         }
         // `VICTORY_CARD_BUFFERS_MIN_KB` (after fxceless c36971b2) says the
@@ -514,9 +516,9 @@ fn card_room_for(size: u64) -> Option<ID3D12Resource> {
 /// alone; what moves is what shaders read.
 fn window_card_most() -> u64 {
     static MOST: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    // Off AMD 2,048 MB by default ([`card_limits`] says why).
+    // Off AMD 3,072 MB by default ([`card_limits`] says why).
     *MOST.get_or_init(|| {
-        let default = if amd_card() { 0 } else { 2048 };
+        let default = if amd_card() { 0 } else { 3072 };
         std::env::var("VICTORY_CARD_WINDOWS_MB").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(default) << 20
     })
 }

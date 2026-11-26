@@ -3048,6 +3048,27 @@ fn stale_under_flights(runs: &[&HostList]) -> Vec<(std::sync::Arc<crate::shadow:
         return spans;
     }
     spans.retain(|(shadow, from, to)| shadow.stale_under_writes(*from, *to - *from));
+    // Diagnostics: what makes flights settle here, the first 60 times
+    // (`VICTORY_STALE_TRACE=1`).
+    static TRACE: OnceLock<bool> = OnceLock::new();
+    if *TRACE.get_or_init(|| std::env::var_os("VICTORY_STALE_TRACE").is_some_and(|v| v == "1")) {
+        static SAID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        for (shadow, from, to) in &spans {
+            if SAID.fetch_add(1, Ordering::Relaxed) < 60 {
+                tracing::info!(
+                    "stale trace: copy {:#x}+{:#x} watched={} unwatched={} card={} refreshed {:#x}..{:#x} ({} KiB)",
+                    shadow.trace_span().0,
+                    shadow.trace_span().1,
+                    shadow.trace_span().2,
+                    shadow.unwatched(),
+                    shadow.card_sides().is_some(),
+                    from,
+                    to,
+                    (to - from) >> 10
+                );
+            }
+        }
+    }
     spans
 }
 

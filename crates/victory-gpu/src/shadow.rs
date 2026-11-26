@@ -473,6 +473,19 @@ fn amd_card() -> bool {
     host().is_none_or(|h| crate::indirect::amd(&h.device))
 }
 
+/// Whether a refresh of a copy in the card's memory sends up only the bytes
+/// that differ from what the copy holds (`VICTORY_COPY_CHANGED=1`; after
+/// LooperSalty/AnyXboxX's Neptune `VICTORY_COPY_CHANGED`). A page counts as
+/// written when the kernel says so, and what our own copy-back wrote into
+/// title memory counts too: such pages came back from the card, were found
+/// written, and were sent up to the card that had made them. What also
+/// changes: title bytes written again with the value the copy holds do not
+/// go up over what a shader has written there since.
+fn copy_changed() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_COPY_CHANGED").is_some_and(|v| v == "1"))
+}
+
 /// Bytes alive of windows' card sides ([`window_card_most`]).
 static WINDOW_CARD_BYTES: AtomicU64 = AtomicU64::new(0);
 
@@ -2922,6 +2935,12 @@ impl Shadow {
 
     /// Whether the memory behind the copy turned out not to be write-watched:
     /// every refresh then copies its whole range.
+    /// For traces: where the title buffer starts, its length, and whether
+    /// it is write-watched (0 unknown, 1 yes, 2 no, 3 by guards).
+    pub(crate) fn trace_span(&self) -> (u64, u64, u8) {
+        (self.start, self.len, self.watched.load(Ordering::Relaxed))
+    }
+
     pub(crate) fn unwatched(&self) -> bool {
         self.watched.load(Ordering::Relaxed) == NOT_WATCHED
     }
@@ -3529,6 +3548,15 @@ impl Shadow {
             note_stale(0);
             return true;
         }
+        // Experiment (`VICTORY_MERGE_GUARDED=0`): guarded memory settles
+        // instead of merging.
+        static GUARDED_MERGE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if self.watched.load(Ordering::Relaxed) == GUARDED
+            && !*GUARDED_MERGE.get_or_init(|| std::env::var_os("VICTORY_MERGE_GUARDED").is_none_or(|v| v != "0"))
+        {
+            note_stale(1);
+            return true;
+        }
         // The declared ranges overlap (views of the title's whole heap from
         // dozens of offsets): as one range each page is asked about and
         // compared once. Every byte of it is in a declared range, and of a
@@ -4093,6 +4121,41 @@ impl Shadow {
         let (from, to) = (from.max(start), to.min(end));
         // SAFETY: inside the mapping (`from` and `to` are within the buffer).
         let at = unsafe { self.data.add(from - start) };
+        // A copy in the card's memory takes only what differs
+        // ([`copy_changed`]).
+        if self.card.is_some() && to > from && to - from <= 16 << 20 && copy_changed() {
+            let n = to - from;
+            // SAFETY: `n` bytes of the mapping, which this refresh alone
+            // writes (the ranges shaders are writing were cut out by
+            // `update`), as the plain copy below does.
+            let held = unsafe { std::slice::from_raw_parts_mut(at, n) };
+            thread_local! {
+                static TITLE: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+            }
+            TITLE.with(|title| {
+                let mut title = title.borrow_mut();
+                // What a read that fails leaves alone stays as the copy has it.
+                title.clear();
+                title.extend_from_slice(held);
+                crate::host::copy_mapped(title.as_mut_ptr(), from as *const u8, n, false);
+                let runs = changed_runs(&title, held);
+                // Runs fewer than 256 bytes apart go up as one: the bytes
+                // between are the same on both sides.
+                let mut joined: Vec<(usize, usize)> = Vec::with_capacity(runs.len());
+                for (r, m) in runs {
+                    match joined.last_mut() {
+                        Some(last) if r <= last.0 + last.1 + 256 => last.1 = r + m - last.0,
+                        _ => joined.push((r, m)),
+                    }
+                }
+                for &(r, m) in &joined {
+                    held[r..r + m].copy_from_slice(&title[r..r + m]);
+                    self.changed(from - start + r, from - start + r + m);
+                    self.card_changed(from - start + r, from - start + r + m);
+                }
+            });
+            return n;
+        }
         if self.card.is_some() && from < to && crate::host::upcheck::on() {
             for_pieces_of(from - start, to - start, |a, b| {
                 let was = self.card_held(a, b - a);

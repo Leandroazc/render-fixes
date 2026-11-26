@@ -49,7 +49,12 @@ share (half the RAM) ran out a minute into the world. Run with `-SeriesS`:
 scripts\play.ps1 -Exe <path of your copy's executable> -SeriesS
 ```
 
-Prologue, Series S profile: about 2 fps, the card the limit (some 215 ms a frame).
+Prologue, Series S profile: 2.6 fps (about 190 ms of the card's time a frame);
+with `-RayTracing` the title's ray-traced light runs too (all 53 builder
+programs, three of them with `VICTORY_FIRSTLANE_OWN=1`), at 2.3 fps. Submissions
+are not sent ahead on NVIDIA (`VICTORY_LATE_WAIT`): the picture came out black.
+With 16 GB the PC pages: some 17 GB are committed and 4-5 GB of it stay in
+memory; 32 GB of RAM is what would help most.
 
 ## How to run it
 

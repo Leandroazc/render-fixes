@@ -25,7 +25,8 @@ if ($Safe) {
 } else {
     $settings.VICTORY_THIN = '1'; $settings.VICTORY_JOIN_PARTS = '8'; $settings.VICTORY_UPLOAD_AHEAD = '1'
 }
-if ($RayTracing) { $settings.VICTORY_BVH_BUILDER = '1' }
+# (FIRSTLANE_OWN: three builder programs read a first lane where half a 64-lane wave runs; on 32-lane cards they translate so)
+if ($RayTracing) { $settings.VICTORY_BVH_BUILDER = '1'; $settings.VICTORY_FIRSTLANE_OWN = '1' }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
 $victory = Join-Path $PSScriptRoot "..\target\$Build\victory.exe"

@@ -1226,6 +1226,13 @@ mod tests {
             eprintln!("no host depth bounds support; skipped");
             return;
         }
+        // GitHub's Windows runners have only WARP, which reports depth
+        // bounds but draws the fragment outside them (CI run of 2026-11-27);
+        // a real card here does cull it.
+        if std::env::var_os("CI").is_some() {
+            eprintln!("on CI's WARP, which reports depth bounds without applying them; skipped");
+            return;
+        }
         let Some(dxc) = dxc() else {
             eprintln!("no PC dxc.exe; skipped");
             return;

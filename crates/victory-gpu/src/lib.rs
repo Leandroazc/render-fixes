@@ -88,6 +88,8 @@ mod tiles;
 pub mod signature;
 #[cfg(windows)]
 pub mod streamline;
+#[cfg(windows)]
+mod fsrfg;
 mod switch;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod ab;

@@ -10029,6 +10029,7 @@ impl Host {
                 },
             );
             let called = crate::streamline::present_called(&presenting);
+            crate::fsrfg::present(width, height);
             let _ = p.swap_chain.Present(0, DXGI_PRESENT(0));
             crate::streamline::present_returned(called);
             crate::streamline::present_ends(presenting);
@@ -10104,9 +10105,11 @@ impl Host {
                 }
                 // (`VICTORY_STREAMLINE_PRESENT=1`, DLSS without frame
                 // generation: Streamline's proxy of it, for its present hook.)
-                None => crate::streamline::present_hooked(
-                    factory.CreateSwapChainForHwnd(&self.queue, hwnd, &desc, None, None)?.cast::<IDXGISwapChain3>()?,
-                ),
+                None => {
+                    let made = factory.CreateSwapChainForHwnd(&self.queue, hwnd, &desc, None, None)?.cast::<IDXGISwapChain3>()?;
+                    // FSR frame generation: FidelityFX's swap chain in its place.
+                    if crate::fsrfg::on() { crate::fsrfg::wrap(made, &self.queue) } else { crate::streamline::present_hooked(made) }
+                }
             };
             let copy = self.new_list()?;
             copy.close();

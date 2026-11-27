@@ -31,6 +31,9 @@ param(
     # Frame generation is made ready at every start with Streamline, on or off, so that the F1 menu switches it
     # and changes its amount while playing. -NoFrameGenReady: only with -FrameGen, as before.
     [switch]$NoFrameGenReady,
+    # AMD FidelityFX frame generation (FSR 3) in place of DLSS's: any card, an RTX 2060 SUPER too (DLSS Frame
+    # Generation needs an RTX 40). Needs AMD's files from scripts\get-amd-fsr.ps1.
+    [switch]$FsrFrameGen,
     # Frames begin every 1/Fps s whatever the title asks (it asks 1/30). 1000, the default: no cap, a frame
     # begins as soon as the last is done. 30: the title's own rate.
     [ValidateRange(1, 1000)][int]$Fps = 1000,
@@ -115,6 +118,24 @@ if ($Dlss -ne 'off') {
     }
 }
 if ($fpsWanted -gt 0) { $settings.VICTORY_FRAME_INTERVAL_US = [string][int][math]::Round(1000000 / $fpsWanted) }
+# Cards without DLSS frame generation (before the RTX 40, and other makers'): FSR frame generation by itself
+# when AMD's files are there and -FsrFrameGen was not given (-FsrFrameGen:$false leaves it off). On an RTX 2060
+# SUPER, Series S: 17 frames rendered and 30 shown a second.
+if (-not $PSBoundParameters.ContainsKey('FsrFrameGen') -and (Test-Path (Join-Path $repo 'amd-sdk\FidelityFX\bin\amd_fidelityfx_loader_dx12.dll'))) {
+    $card = ''
+    try { $card = [string](& nvidia-smi --query-gpu=name --format=csv,noheader 2>$null | Select-Object -First 1) } catch {}
+    if ($card -notmatch 'RTX (PRO )?[45]\d{3}') { $FsrFrameGen = [switch]$true }
+}
+if ($FsrFrameGen) {
+    $ffx = Join-Path $repo 'amd-sdk\FidelityFX\bin'
+    if (Test-Path (Join-Path $ffx 'amd_fidelityfx_loader_dx12.dll')) {
+        # Its swap chain in place of ours; DLSS's frame generation (Streamline's swap chain) is left out.
+        $settings.VICTORY_FSR_FG = '1'; $settings.VICTORY_FFX_DIR = $ffx
+        $settings.Remove('VICTORY_FRAMEGEN'); $settings.Remove('VICTORY_FRAMEGEN_X'); $settings.Remove('VICTORY_TEXTURE_ROOM_PERCENT')
+    } else {
+        Write-Host "No AMD files in ${ffx}: scripts\get-amd-fsr.ps1 fetches them from AMD once. Running without FSR frame generation."
+    }
+}
 foreach ($k in $menu.Keys) {
     if ($k -like 'VICTORY_MENU_*') { continue }
     if ($menu[$k]) { $settings[$k] = $menu[$k] } else { $settings.Remove($k) }

@@ -561,7 +561,7 @@ fn load(path: &Path) -> Result<Sl, String> {
 /// Whether the title's FidelityFX calls are to be served (DLSS or frame
 /// generation is on): `victory_hle` then puts its own in front of them.
 pub fn serving() -> bool {
-    PLAN.get().is_some_and(|p| p.dlss || p.framegen)
+    PLAN.get().is_some_and(|p| p.dlss || p.framegen) || crate::fsrfg::on()
 }
 
 /// Whether DLSS is to take the title's upscale dispatches (`VICTORY_DLSS=1`
@@ -782,6 +782,8 @@ fn frame_token(sl: &Sl, index: u32) -> Option<*mut abi::FrameToken> {
 /// its inputs are noted there for the present); the title's own runs
 /// otherwise.
 pub fn upscale(up: &Upscale) -> Taken {
+    // FSR frame generation prepares this frame whatever does the upscaling.
+    crate::fsrfg::upscale(up);
     let Some(plan) = PLAN.get() else {
         return Taken::No("Streamline is not loaded");
     };

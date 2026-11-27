@@ -264,18 +264,22 @@ static IDLE: std::sync::Mutex<(Vec<Idle>, u64)> = std::sync::Mutex::new((Vec::ne
 /// between them (a list keeps scratch chunks over a reset only while lists
 /// do not share them, `VICTORY_SCRATCH_POOL=0`).
 #[cfg(windows)]
-const IDLE_MOST: (usize, u64) = (512, 256 << 20);
+const IDLE_MOST_FULL: (usize, u64) = (512, 256 << 20);
+
+/// [`IDLE_MOST_FULL`], halved on a PC with little memory (`host::small_memory`):
+/// with the full pool the RTX 2060 SUPER's 16 GB PC had 1.9 GB left to commit.
+fn idle_most() -> (usize, u64) {
+    if crate::host::small_memory() { (256, 128 << 20) } else { IDLE_MOST_FULL }
+}
 
 /// Whether host lists that have run are used again (on by default;
 /// `VICTORY_LIST_POOL=0`: each is made new and thrown away, as before).
 #[cfg(windows)]
 fn pools() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    // Off by default on a PC with little memory (`host::small_memory`).
-    *ON.get_or_init(|| match std::env::var_os("VICTORY_LIST_POOL") {
-        Some(v) => v != "0",
-        None => !crate::host::small_memory(),
-    })
+    // On a PC with little memory with half the pool (`idle_most`): 7.7 fps
+    // against 7.3 without one (RTX 2060 SUPER, 16 GB, Series S).
+    *ON.get_or_init(|| std::env::var_os("VICTORY_LIST_POOL").is_none_or(|v| v != "0"))
 }
 
 /// A host list open for recording: one that has run, as a title's list is
@@ -309,7 +313,7 @@ pub(crate) fn recycle(lists: Vec<Detached>, ran: &[usize]) {
         // The descriptor slots and the upload memory its commands named.
         drop(state);
         drop(_uploads);
-        if !ran.contains(&i) || IDLE.lock().unwrap_or_else(|e| e.into_inner()).0.len() >= IDLE_MOST.0 {
+        if !ran.contains(&i) || IDLE.lock().unwrap_or_else(|e| e.into_inner()).0.len() >= idle_most().0 {
             continue;
         }
         // As the title's reset does: what the list kept for its commands
@@ -317,7 +321,7 @@ pub(crate) fn recycle(lists: Vec<Detached>, ran: &[usize]) {
         host.reset();
         let bytes = host.scratch_kept();
         let mut idle = IDLE.lock().unwrap_or_else(|e| e.into_inner());
-        if idle.0.len() < IDLE_MOST.0 && idle.1 + bytes <= IDLE_MOST.1 {
+        if idle.0.len() < idle_most().0 && idle.1 + bytes <= idle_most().1 {
             idle.0.push(Idle(host, bytes));
             idle.1 += bytes;
         }

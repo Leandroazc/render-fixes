@@ -230,10 +230,10 @@ fn card_limits() -> (u64, u64) {
         // buffers and 3 GiB of windows the card's time went down to 64-68 ms
         // (late wait stage 1, 5 fps); with windows alone it was 161-171.
         if !amd_card() {
-            if env_mb("VICTORY_CARD_BUFFERS_MIN_MB").is_none() {
+            if std::env::var_os("VICTORY_CARD_BUFFERS_MIN_MB").is_none() {
                 min_bytes = 64 << 10;
             }
-            if env_mb("VICTORY_CARD_BUFFERS_MB").is_none() {
+            if std::env::var_os("VICTORY_CARD_BUFFERS_MB").is_none() {
                 max_bytes = max_bytes.max(2 << 30);
             }
         }

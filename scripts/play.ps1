@@ -80,7 +80,8 @@ if ($Safe) {
     # for it: off by default, as other ways the title may wait are not known.
     $settings.VICTORY_INDIRECT_BATCH = '2'
 }
-if ($RayTracing) { $settings.VICTORY_BVH_BUILDER = '1' }
+# (FIRSTLANE_OWN: three builder programs read a first lane where half a 64-lane wave runs; on 32-lane cards they translate so)
+if ($RayTracing) { $settings.VICTORY_BVH_BUILDER = '1'; $settings.VICTORY_FIRSTLANE_OWN = '1' }
 # The whole screen, with no frame, as on the console.
 if (-not $Windowed) { $settings.VICTORY_FULLSCREEN = '1' }
 # The performance panel (FPS, frame times, GPU, CPU, VRAM, RAM) in the upper left

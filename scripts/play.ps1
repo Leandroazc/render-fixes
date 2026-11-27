@@ -20,7 +20,7 @@ param(
     [switch]$NoPanel,
     [ValidateSet('series-x', 'series-s')][string]$Console = 'series-x',
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
-    [ValidateSet('auto', '7900xtx', '4070', '4090')][string]$Machine = 'auto',
+    [ValidateSet('auto', '7900xtx', '4070', '4090', 'small')][string]$Machine = 'auto',
     [hashtable]$More = @{}
 )
 $settings = @{
@@ -58,6 +58,13 @@ if ($Machine -eq '7900xtx') {
     # Kept under -Safe too: without it those programs do not translate and
     # their draws are dropped, the picture -Safe is there to check.
     $settings.VICTORY_WAVE_WIDE_ONLY = '6f225b641c5b0708,5dc3b25986622949,369cbe906ea72764,2cc4c197ee29e291'
+}
+# Six cores (12 threads) or fewer, NVIDIA: the 4070 profile with fewer workers, and the card limits this branch sets for cards other than AMD's (RTX 2060 SUPER, Ryzen 5 5600, 16 GB: 8.0 fps against 7.8 with the 4070's 8/6/4).
+if ($Machine -ne '7900xtx' -and [Environment]::ProcessorCount -le 12) { $Machine = 'small' }
+if ($Machine -eq 'small') {
+    $settings.VICTORY_THIN_THREADS = '6'; $settings.VICTORY_UNDER_THREADS = '4'; $settings.VICTORY_LAND_THREADS = '3'
+    $settings.VICTORY_MAP_THREADS = '1'; $settings.VICTORY_PIPELINE_WORKERS = '3'
+    if (-not $Safe) { $settings.VICTORY_CARD_RESERVE_BUDGETS = '1' }
 }
 if ($Machine -eq '4070') {
     # Ryzen 7 7800X3D: eight physical cores, versus the 4090 test PC's sixteen.

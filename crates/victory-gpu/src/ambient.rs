@@ -144,8 +144,24 @@ pub(crate) fn on() -> bool {
 fn bounds() -> (f32, f32) {
     match rt_band() {
         Some(b) if crate::pipeline::builder_runs() => (b.least, b.most),
-        _ => (1.0, 4.0),
+        _ => (1.0, most()),
     }
+}
+
+/// Without rays, the most the title's leftover light counts, as a multiple of
+/// the estimate (`VICTORY_AMBIENT_MOST`; 4 unless set, as megafork's
+/// `VICTORY_AMBIENT_MOST` after it). What the title's resolve leaves without
+/// rays is blocks of its probes' memory: up to four times the estimate they
+/// showed as flat patches on shaded walls.
+fn most() -> f32 {
+    static SET: OnceLock<f32> = OnceLock::new();
+    *SET.get_or_init(|| {
+        std::env::var("VICTORY_AMBIENT_MOST")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v >= 1.0)
+            .unwrap_or(4.0)
+    })
 }
 
 /// The most the air scatters, as a multiple of the light around

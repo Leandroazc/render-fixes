@@ -37,6 +37,13 @@ param(
     [hashtable]$More = @{}
 )
 $repo = Split-Path $PSScriptRoot -Parent
+# A card of 8 GB or less (an RTX 2060 SUPER: the card was 95 % busy at 63 ms a frame on Series S): DLSS
+# Performance unless -Dlss says otherwise, 17-18 fps against 16 with Quality and the picture as sharp to the eye.
+if (-not $PSBoundParameters.ContainsKey('Dlss')) {
+    $cardMb = 0
+    try { $cardMb = [int](& nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>$null | Select-Object -First 1) } catch {}
+    if ($cardMb -gt 0 -and $cardMb -le 8192) { $Dlss = 'performance' }
+}
 # What the F1 menu saved: its own choices (VICTORY_MENU_...) stand in for this script's options, and its
 # switches go over the settings below. An empty value unsets a switch.
 $menuFile = Join-Path $repo 'victory-settings.txt'
@@ -76,7 +83,10 @@ $settings = @{
     VICTORY_HEAP_SYNC_FIRST = '1'; VICTORY_SYNC_IN_PLACE = '1'; VICTORY_SPANS_QUICK = '1'; VICTORY_SYNC_FINE = '1'
     VICTORY_HEAP_SYNC_AT_SUBMIT = '1'
     # Light without the title's ray tracing: an estimate of indirect light and of reflections
-    VICTORY_AMBIENT = '0.8'; VICTORY_AMBIENT_AIR = '1.5'; VICTORY_AMBIENT_SPECULAR = '1'
+    # The reflections' estimate is off: it took the light of what is on screen along the reflected direction, and
+    # a magenta poster turned the cell's walls and bunk purple in patches (RTX 2060 SUPER, Series S, the camera
+    # coming into the cell); without it those patches were gone, at the same frame rate.
+    VICTORY_AMBIENT = '0.8'; VICTORY_AMBIENT_AIR = '1.5'; VICTORY_AMBIENT_SPECULAR = '0'
     # Pixel programs keep the console's early depth test
     VICTORY_EARLY_DEPTH = '1'
     # Left out: the decal heap's defragmentation (5.6 ms of GPU a frame) and the heat-haze pass (smeared blocks)

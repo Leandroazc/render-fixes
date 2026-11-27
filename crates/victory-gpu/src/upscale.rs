@@ -13,7 +13,8 @@
 //! records, the queries answer as the SDK's upscaler does but with no
 //! jitter (nothing accumulates frames here, so a jittered camera would
 //! shake), and an upscale dispatch records a pass that samples the render
-//! area of the colour input, bilinear, into the output.
+//! area of the colour input, Catmull-Rom (bilinear blurred a 720p image
+//! stretched to 1080p), clamped to the four nearest texels, into the output.
 //! shortcut: no temporal accumulation, no sharpening; the picture is the
 //! render resolution scaled up.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -126,7 +127,7 @@ pub extern "system" fn create_context(out: *mut *mut c_void, desc: *const Header
         flags = format_args!("{:#x}", words[4]),
         render = ?context.max_render,
         upscale = ?context.max_upscale,
-        "FidelityFX: upscaler context made (here: a bilinear pass)"
+        "FidelityFX: upscaler context made (here: a Catmull-Rom pass)"
     );
     *out = Box::into_raw(Box::new(context)).cast();
     OK
@@ -260,11 +261,39 @@ void main(uint3 at : SV_DispatchThreadID) {
     if (at.x >= (uint)upscale.x || at.y >= (uint)upscale.y) return;
     float w, h;
     color.GetDimensions(w, h);
-    // The render area is the top left of the colour input.
-    float2 uv = (float2(at.xy) + 0.5) / upscale * render / float2(w, h);
-    // Not past the render area's last texel centre.
-    uv = min(uv, (render - 0.5) / float2(w, h));
-    output[at.xy] = color.SampleLevel(linear_clamp, uv, 0);
+    float2 size = float2(w, h);
+    // The render area is the top left of the colour input; in its texels.
+    float2 p = (float2(at.xy) + 0.5) / upscale * render;
+    // Catmull-Rom, nine taps through the bilinear filter (the middle two
+    // texels of each row and column taken as one tap).
+    float2 t1 = floor(p - 0.5) + 0.5;
+    float2 f = p - t1;
+    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    float2 w3 = f * f * (-0.5 + 0.5 * f);
+    float2 w12 = w1 + w2;
+    float2 lo = 0.5, hi = render - 0.5;
+    float2 t0 = clamp(t1 - 1.0, lo, hi) / size;
+    float2 t3 = clamp(t1 + 2.0, lo, hi) / size;
+    float2 t12 = clamp(t1 + w2 / w12, lo, hi) / size;
+    float4 c = 0;
+    c += color.SampleLevel(linear_clamp, float2(t0.x, t0.y), 0) * (w0.x * w0.y);
+    c += color.SampleLevel(linear_clamp, float2(t12.x, t0.y), 0) * (w12.x * w0.y);
+    c += color.SampleLevel(linear_clamp, float2(t3.x, t0.y), 0) * (w3.x * w0.y);
+    c += color.SampleLevel(linear_clamp, float2(t0.x, t12.y), 0) * (w0.x * w12.y);
+    c += color.SampleLevel(linear_clamp, float2(t12.x, t12.y), 0) * (w12.x * w12.y);
+    c += color.SampleLevel(linear_clamp, float2(t3.x, t12.y), 0) * (w3.x * w12.y);
+    c += color.SampleLevel(linear_clamp, float2(t0.x, t3.y), 0) * (w0.x * w3.y);
+    c += color.SampleLevel(linear_clamp, float2(t12.x, t3.y), 0) * (w12.x * w3.y);
+    c += color.SampleLevel(linear_clamp, float2(t3.x, t3.y), 0) * (w3.x * w3.y);
+    // No ringing: within the four nearest texels (HDR highlights would
+    // otherwise leave dark halos).
+    int2 q = int2(clamp(t1, lo, hi - 1.0));
+    float4 a = color.Load(int3(q, 0)), b = color.Load(int3(q + int2(1, 0), 0));
+    float4 d = color.Load(int3(q + int2(0, 1), 0)), e = color.Load(int3(q + int2(1, 1), 0));
+    float4 mn = min(min(a, b), min(d, e)), mx = max(max(a, b), max(d, e));
+    output[at.xy] = clamp(c, mn, mx);
 }
 "#;
 

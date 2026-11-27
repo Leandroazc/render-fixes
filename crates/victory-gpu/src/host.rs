@@ -2579,11 +2579,14 @@ fn late_stage() -> u8 {
             // it (Series S profile, runs nvin and nvctl), and with it off
             // the prologue draws whole at 2.6 fps (run nvlw0).
             Err(_) if crate::shadow::relay() && host().is_some_and(|h| crate::indirect::amd(&h.device)) => 3,
-            // Elsewhere stage 1 (same card, Series S, bursts of eight shots
-            // at 300 s): off 3.6 fps; stage 1 5.3 fps with no flicker; stage
-            // 2 6.6 fps but the window's glass and fence came and went from
-            // frame to frame (runs fl0, fl1, fl2).
-            Err(_) if crate::shadow::relay() && host().is_some() => 1,
+            // Elsewhere stage 2 (same card, Series S, bursts of eight shots):
+            // off 3.6 fps; stage 1 5.3 fps with no flicker; stage 2 6.6 fps
+            // but the window's glass and fence came and went from frame to
+            // frame (runs fl0, fl1, fl2). On the base with the 7900 XTX
+            // fork's flicker fixes (014d52de) stage 2 no longer flickers
+            // (run lw2new, spread 0.9-1.1) and the waits for flights fell from
+            // 63 ms a frame to 6.
+            Err(_) if crate::shadow::relay() && host().is_some() => 2,
             _ => 0,
         }
     })
